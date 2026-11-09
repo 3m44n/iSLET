@@ -1,8 +1,8 @@
-//! Animated pill container with Media HUD, FFT Spectrum Visualizer, and Volume/Brightness Sliders.
+//! Animated pill container with dominant-color glow, hover seek bar, idle clock, and `reduce_motion` support.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use adw::prelude::*;
 use cairo::{Context, Format, ImageSurface, Region};
@@ -17,7 +17,6 @@ use tracing::trace;
 
 use crate::visualizer_widget::SpectrumWidget;
 
-/// Manages the visual pill widget, cross-fading stack views, marquee text, spectrum visualizer, and input mask.
 pub struct PillSurface {
     outer_box: gtk4::Box,
     pill_frame: gtk4::Box,
@@ -29,11 +28,14 @@ pub struct PillSurface {
     spectrum: SpectrumWidget,
     controls_box: gtk4::Box,
     play_pause_btn: gtk4::Button,
+    seek_scale: gtk4::Scale,
+    accent_provider: gtk4::CssProvider,
     active_player_id: Rc<RefCell<Option<String>>>,
     full_title: Rc<RefCell<String>>,
     marquee_offset: Rc<Cell<usize>>,
     marquee_pause_ticks: Rc<Cell<u8>>,
     marquee_running: Rc<Cell<bool>>,
+    reduce_motion: Rc<Cell<bool>>,
     slider_icon: gtk4::Label,
     slider_bar: gtk4::ProgressBar,
     slider_pct_label: gtk4::Label,
@@ -41,6 +43,7 @@ pub struct PillSurface {
     spring_anim: adw::SpringAnimation,
     start_dims: Rc<Cell<PillDimensions>>,
     target_dims: Rc<Cell<PillDimensions>>,
+    window: gtk4::ApplicationWindow,
 }
 
 impl PillSurface {
@@ -56,6 +59,17 @@ impl PillSurface {
         let start_dims = Rc::new(Cell::new(initial));
         let target_dims = Rc::new(Cell::new(initial));
         let active_player_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let reduce_motion = Rc::new(Cell::new(false));
+
+        // Dynamic CSS provider for dominant-color album art glow
+        let accent_provider = gtk4::CssProvider::new();
+        if let Some(display) = gdk4::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &accent_provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+        }
 
         let outer_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
@@ -80,16 +94,16 @@ impl PillSurface {
             .vexpand(true)
             .build();
 
-        // --- 1. Idle View ---
+        // --- 1. Idle View (compact dot + time) ---
         let idle_label = gtk4::Label::builder()
-            .label("●  Islet")
+            .label(&format!("●  {}", current_hh_mm()))
             .halign(gtk4::Align::Center)
             .valign(gtk4::Align::Center)
             .css_classes(["islet-label"])
             .build();
         view_stack.add_named(&idle_label, Some("idle"));
 
-        // --- 2. Media View (Album Art + Marquee Title/Artist + FFT Spectrum Bars + Controls) ---
+        // --- 2. Media View (Album Art + Marquee Title/Artist + FFT Spectrum + Hover Seek/Controls) ---
         let media_root = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .valign(gtk4::Align::Center)
@@ -141,10 +155,12 @@ impl PillSurface {
         media_top_row.append(&text_col);
         media_top_row.append(spectrum.widget());
 
+        // Hover controls: Prev / Play-Pause / Next + Interactive Seek Bar
         let controls_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
-            .halign(gtk4::Align::Center)
-            .spacing(14)
+            .halign(gtk4::Align::Fill)
+            .valign(gtk4::Align::Center)
+            .spacing(10)
             .visible(false)
             .css_classes(["islet-controls"])
             .build();
@@ -155,6 +171,11 @@ impl PillSurface {
         for btn in [&prev_btn, &play_pause_btn, &next_btn] {
             btn.add_css_class("islet-ctrl-btn");
         }
+
+        let seek_scale = gtk4::Scale::with_range(gtk4::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        seek_scale.set_draw_value(false);
+        seek_scale.set_hexpand(true);
+        seek_scale.add_css_class("islet-seek-bar");
 
         let pid_prev = Rc::clone(&active_player_id);
         let tx_prev = mpris_tx.clone();
@@ -173,22 +194,35 @@ impl PillSurface {
         });
 
         let pid_next = Rc::clone(&active_player_id);
-        let tx_next = mpris_tx;
+        let tx_next = mpris_tx.clone();
         next_btn.connect_clicked(move |_| {
             if let Some(id) = pid_next.borrow().clone() {
                 let _ = tx_next.send(MprisCommand::Next(id));
             }
         });
 
+        let pid_seek = Rc::clone(&active_player_id);
+        let tx_seek = mpris_tx;
+        seek_scale.connect_change_value(move |scale, _, new_val| {
+            let delta_pct = new_val - scale.value();
+            if let Some(id) = pid_seek.borrow().clone() {
+                // Seek relative by 5s per 10% scrub step
+                let offset_us = (delta_pct * 500_000.0) as i64;
+                let _ = tx_seek.send(MprisCommand::SeekRelativeUs(id, offset_us));
+            }
+            glib::Propagation::Proceed
+        });
+
         controls_box.append(&prev_btn);
         controls_box.append(&play_pause_btn);
         controls_box.append(&next_btn);
+        controls_box.append(&seek_scale);
 
         media_root.append(&media_top_row);
         media_root.append(&controls_box);
         view_stack.add_named(&media_root, Some("media"));
 
-        // --- 3. Slider View (Volume & Brightness) ---
+        // --- 3. Slider View ---
         let slider_row = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .valign(gtk4::Align::Center)
@@ -296,11 +330,14 @@ impl PillSurface {
             spectrum,
             controls_box,
             play_pause_btn,
+            seek_scale,
+            accent_provider,
             active_player_id,
             full_title,
             marquee_offset,
             marquee_pause_ticks,
             marquee_running,
+            reduce_motion,
             slider_icon,
             slider_bar,
             slider_pct_label,
@@ -308,6 +345,7 @@ impl PillSurface {
             spring_anim,
             start_dims,
             target_dims,
+            window: window.clone(),
         }
     }
 
@@ -316,12 +354,20 @@ impl PillSurface {
         &self.outer_box
     }
 
-    /// Feeds a new FFT spectrum frame to the Cairo bar widget.
     pub fn update_spectrum(&self, bars: &[f32]) {
         self.spectrum.set_target_frame(bars);
     }
 
-    /// Updates the pill's active view, metadata, visualizer state, and smoothly retargets the morph spring.
+    /// Toggles `reduce_motion` mode from `config.toml`.
+    pub fn set_reduce_motion(&self, enabled: bool) {
+        self.reduce_motion.set(enabled);
+        self.view_stack.set_transition_type(if enabled {
+            gtk4::StackTransitionType::None
+        } else {
+            gtk4::StackTransitionType::Crossfade
+        });
+    }
+
     pub fn apply_transition(
         &self,
         effect: &TransitionEffect,
@@ -335,8 +381,8 @@ impl PillSurface {
         self.target_dims.set(effect.dimensions);
         self.pill_frame.remove_css_class("mute-pulse");
 
-        // Start/stop frame-clock visualizer tick callback (0% CPU when not playing or hidden).
-        self.spectrum.set_running(visualizer_active);
+        self.spectrum
+            .set_running(visualizer_active && !self.reduce_motion.get());
 
         match &effect.state {
             PillState::Hidden => {
@@ -347,7 +393,8 @@ impl PillSurface {
                 self.stop_marquee();
                 self.pill_frame.set_opacity(1.0);
                 self.pill_frame.remove_css_class("expanded");
-                self.idle_label.set_label("●  Islet");
+                self.idle_label
+                    .set_label(&format!("●  {}", current_hh_mm()));
                 self.view_stack.set_visible_child_name("idle");
             }
             PillState::Media {
@@ -372,6 +419,15 @@ impl PillSurface {
 
                 if let Some(meta) = metadata {
                     self.spectrum.set_accent_color(meta.accent_rgb);
+                    self.apply_accent_glow(meta.accent_rgb);
+
+                    if let (Some(pos), Some(dur)) = (meta.position_ms, meta.duration_ms) {
+                        if dur > 0 {
+                            let pct = ((pos as f64 / dur as f64) * 100.0).clamp(0.0, 100.0);
+                            self.seek_scale.set_value(pct);
+                        }
+                    }
+
                     let mut current_full = self.full_title.borrow_mut();
                     if *current_full != meta.title {
                         *current_full = meta.title.clone();
@@ -385,7 +441,9 @@ impl PillSurface {
                         self.art_picture.set_filename(Some(art_path));
                     }
                     drop(current_full);
-                    self.ensure_marquee_if_needed(status == PlaybackStatus::Playing);
+                    self.ensure_marquee_if_needed(
+                        status == PlaybackStatus::Playing && !self.reduce_motion.get(),
+                    );
                 } else {
                     self.stop_marquee();
                 }
@@ -399,7 +457,7 @@ impl PillSurface {
                 self.stop_marquee();
                 self.pill_frame.set_opacity(1.0);
                 self.pill_frame.add_css_class("expanded");
-                if *pulse {
+                if *pulse && !self.reduce_motion.get() {
                     self.pill_frame.add_css_class("mute-pulse");
                 }
 
@@ -439,12 +497,30 @@ impl PillSurface {
             }
         }
 
-        let current_velocity = self.spring_anim.velocity();
-        self.spring_anim.set_initial_velocity(current_velocity);
-        self.spring_anim.play();
+        if self.reduce_motion.get() {
+            self.spring_anim.pause();
+            self.current_dims.set(effect.dimensions);
+            self.pill_frame
+                .set_width_request(effect.dimensions.width.round() as i32);
+            self.pill_frame
+                .set_height_request(effect.dimensions.height.round() as i32);
+            update_wayland_input_region(&self.window, effect.dimensions);
+        } else {
+            let current_velocity = self.spring_anim.velocity();
+            self.spring_anim.set_initial_velocity(current_velocity);
+            self.spring_anim.play();
+        }
     }
 
-    /// Runs the marquee timer only when a long title (> 20 chars) is actively playing.
+    /// Injects dynamic CSS rules so the pill and album art glow softly in the album's dominant color.
+    fn apply_accent_glow(&self, rgb: Option<(u8, u8, u8)>) {
+        let (r, g, b) = rgb.unwrap_or((137, 180, 250));
+        let dynamic_css = format!(
+            ".islet-pill.expanded {{                 border-color: rgba({r}, {g}, {b}, 0.35);                 box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55), 0 0 22px rgba({r}, {g}, {b}, 0.28);              }}              .islet-art {{                 box-shadow: 0 0 14px rgba({r}, {g}, {b}, 0.45);              }}              .islet-seek-bar highlight {{                 background-color: rgb({r}, {g}, {b});              }}"
+        );
+        self.accent_provider.load_from_string(&dynamic_css);
+    }
+
     fn ensure_marquee_if_needed(&self, is_playing: bool) {
         const WINDOW_CHARS: usize = 20;
         let needs_scroll = is_playing && self.full_title.borrow().chars().count() > WINDOW_CHARS;
@@ -501,6 +577,16 @@ impl PillSurface {
     fn stop_marquee(&self) {
         self.marquee_running.set(false);
     }
+}
+
+fn current_hh_mm() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let hours = (secs / 3600) % 24;
+    let mins = (secs / 60) % 60;
+    format!("{hours:02}:{mins:02}")
 }
 
 fn update_wayland_input_region(window: &gtk4::ApplicationWindow, dims: PillDimensions) {

@@ -1,8 +1,10 @@
-//! Event-driven background sources for Islet (MPRIS2, Audio Volume, Backlight, and FFT Visualizer).
+//! Event-driven background sources for Islet (MPRIS2, Audio, Backlight, Visualizer, Config/CSS, Multi-Monitor).
 
 pub mod art;
 pub mod audio;
 pub mod backlight;
+pub mod config_watcher;
+pub mod monitor_watcher;
 pub mod mpris;
 pub mod visualizer;
 
@@ -18,7 +20,7 @@ pub struct SourceHandles {
     pub visualizer_tx: watch::Sender<VisualizerControl>,
 }
 
-/// Starts all background hardware/D-Bus/FFT event listeners on a dedicated Tokio runtime thread.
+/// Starts all background hardware/D-Bus/FFT/inotify listeners on a dedicated Tokio runtime thread.
 #[must_use]
 pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
     let (mpris_tx, mpris_rx) = mpsc::unbounded_channel();
@@ -39,13 +41,17 @@ pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
                 let mpris_sender = sender.clone();
                 let audio_sender = sender.clone();
                 let bright_sender = sender.clone();
-                let viz_sender = sender;
+                let viz_sender = sender.clone();
+                let cfg_sender = sender.clone();
+                let mon_sender = sender;
 
                 tokio::join!(
                     mpris::run_mpris_watcher(mpris_sender, mpris_rx),
                     audio::run_audio_watcher(audio_sender),
                     backlight::run_backlight_watcher(bright_sender),
                     visualizer::run_visualizer(viz_sender, visualizer_rx),
+                    config_watcher::run_config_and_css_watcher(cfg_sender),
+                    monitor_watcher::run_focused_monitor_watcher(mon_sender),
                 );
             });
         })
@@ -62,6 +68,7 @@ mod tests {
     use super::art::percent_decode;
     use super::audio::{parse_pactl_volume_and_mute, parse_wpctl_volume};
     use super::backlight::parse_brightness_percent;
+    use super::monitor_watcher::parse_hyprland_focusedmon;
     use super::mpris::{parse_mpris_metadata_value, parse_playback_status};
     use super::visualizer::{compute_fft_bars, procedural_spectrum_frame};
     use islet_core::PlaybackStatus;
@@ -137,7 +144,6 @@ mod tests {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(1024);
 
-        // Generate a 440 Hz sine wave at 48 kHz sample rate
         let samples: Vec<f32> = (0..1024)
             .map(|i| (2.0 * PI * 440.0 * (i as f32) / 48_000.0).sin())
             .collect();
@@ -150,5 +156,11 @@ mod tests {
         let fallback = procedural_spectrum_frame(1.2, 16);
         assert_eq!(fallback.len(), 16);
         assert!(fallback.iter().all(|&v| (0.0..=1.0).contains(&v)));
+    }
+
+    #[test]
+    fn test_hyprland_focusedmon_parsing() {
+        assert_eq!(parse_hyprland_focusedmon("focusedmon>>DP-1,2"), Some("DP-1"));
+        assert_eq!(parse_hyprland_focusedmon("workspace>>2"), None);
     }
 }

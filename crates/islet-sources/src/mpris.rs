@@ -18,18 +18,17 @@ const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 const ROOT_IFACE: &str = "org.mpris.MediaPlayer2";
 
-/// Outbound media control commands triggered by clicking or hovering the pill.
+/// Outbound media control commands triggered by clicking or interacting with the pill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MprisCommand {
     PlayPause(String),
     Next(String),
     Previous(String),
     Raise(String),
+    /// Seeks by a relative offset in microseconds (`org.mpris.MediaPlayer2.Player.Seek`).
+    SeekRelativeUs(String, i64),
 }
 
-/// Spawns the event-driven MPRIS2 watcher and command dispatcher on the Tokio runtime.
-///
-/// Gracefully logs and exits the task without crashing if the session D-Bus is unavailable.
 pub async fn run_mpris_watcher(
     sender: EventSender,
     mut cmd_rx: mpsc::UnboundedReceiver<MprisCommand>,
@@ -44,7 +43,6 @@ pub async fn run_mpris_watcher(
 
     info!("MPRIS2 D-Bus source connected");
 
-    // 1. Scan already-running MPRIS players on startup.
     if let Ok(dbus) = DBusProxy::new(&conn).await {
         if let Ok(names) = dbus.list_names().await {
             for name in names {
@@ -54,7 +52,6 @@ pub async fn run_mpris_watcher(
             }
         }
 
-        // 2. Subscribe to NameOwnerChanged so newly opened or closed players are tracked live.
         if let Ok(mut name_stream) = dbus.receive_name_owner_changed().await {
             let conn_for_names = conn.clone();
             let sender_for_names = sender.clone();
@@ -88,7 +85,6 @@ pub async fn run_mpris_watcher(
         }
     }
 
-    // 3. Process outbound PlayPause / Next / Previous / Raise commands from UI clicks.
     while let Some(cmd) = cmd_rx.recv().await {
         dispatch_command(&conn, cmd).await;
     }
@@ -110,21 +106,18 @@ fn spawn_player_listener(conn: Connection, bus_name: String, sender: EventSender
         };
         let Ok(props) = props.await else { return };
 
-        // Query initial state immediately.
         if let Ok(iface) = InterfaceName::try_from(PLAYER_IFACE) {
             if let Ok(all) = props.get_all(iface).await {
                 emit_parsed_properties(&bus_name, &all, &sender).await;
             }
         }
 
-        // Subscribe to PropertiesChanged signals (zero polling).
         let Ok(mut stream) = props.receive_properties_changed().await else {
             return;
         };
         while let Some(signal) = stream.next().await {
             if let Ok(args) = signal.args() {
                 if args.interface_name.as_str() == PLAYER_IFACE {
-                    // Fetch full snapshot so PlaybackStatus + Metadata stay consistent.
                     if let Ok(iface) = InterfaceName::try_from(PLAYER_IFACE) {
                         if let Ok(all) = props.get_all(iface).await {
                             emit_parsed_properties(&bus_name, &all, &sender).await;
@@ -146,9 +139,16 @@ async fn emit_parsed_properties(
         .and_then(|v| <&str>::try_from(v).ok())
         .map_or(PlaybackStatus::Stopped, parse_playback_status);
 
+    let position_ms = props
+        .get("Position")
+        .and_then(|v| i64::try_from(v).ok())
+        .filter(|&us| us >= 0)
+        .map(|us| (us as u64) / 1000);
+
     let mut metadata = props.get("Metadata").and_then(parse_mpris_metadata_value);
 
     if let Some(ref mut meta) = metadata {
+        meta.position_ms = position_ms;
         if let Some(ref raw_url) = meta.art_url.clone() {
             let (cached_path, accent) = resolve_art_and_accent(raw_url).await;
             if cached_path.is_some() {
@@ -166,22 +166,44 @@ async fn emit_parsed_properties(
 }
 
 async fn dispatch_command(conn: &Connection, cmd: MprisCommand) {
-    let (player_id, iface, method) = match &cmd {
-        MprisCommand::PlayPause(id) => (id.as_str(), PLAYER_IFACE, "PlayPause"),
-        MprisCommand::Next(id) => (id.as_str(), PLAYER_IFACE, "Next"),
-        MprisCommand::Previous(id) => (id.as_str(), PLAYER_IFACE, "Previous"),
-        MprisCommand::Raise(id) => (id.as_str(), ROOT_IFACE, "Raise"),
-    };
-
-    if let Err(err) = conn
-        .call_method(Some(player_id), MPRIS_PATH, Some(iface), method, &())
-        .await
-    {
-        debug!(%err, player_id, method, "MPRIS command call failed");
+    match cmd {
+        MprisCommand::PlayPause(id) => {
+            let _ = conn
+                .call_method(Some(id.as_str()), MPRIS_PATH, Some(PLAYER_IFACE), "PlayPause", &())
+                .await;
+        }
+        MprisCommand::Next(id) => {
+            let _ = conn
+                .call_method(Some(id.as_str()), MPRIS_PATH, Some(PLAYER_IFACE), "Next", &())
+                .await;
+        }
+        MprisCommand::Previous(id) => {
+            let _ = conn
+                .call_method(Some(id.as_str()), MPRIS_PATH, Some(PLAYER_IFACE), "Previous", &())
+                .await;
+        }
+        MprisCommand::Raise(id) => {
+            let _ = conn
+                .call_method(Some(id.as_str()), MPRIS_PATH, Some(ROOT_IFACE), "Raise", &())
+                .await;
+        }
+        MprisCommand::SeekRelativeUs(id, offset_us) => {
+            if let Err(err) = conn
+                .call_method(
+                    Some(id.as_str()),
+                    MPRIS_PATH,
+                    Some(PLAYER_IFACE),
+                    "Seek",
+                    &(offset_us,),
+                )
+                .await
+            {
+                debug!(%err, "MPRIS Seek call failed");
+            }
+        }
     }
 }
 
-/// Parses an MPRIS `PlaybackStatus` string into `PlaybackStatus`.
 #[must_use]
 pub fn parse_playback_status(raw: &str) -> PlaybackStatus {
     match raw.trim() {
@@ -191,7 +213,6 @@ pub fn parse_playback_status(raw: &str) -> PlaybackStatus {
     }
 }
 
-/// Parses an MPRIS `Metadata` `a{sv}` `OwnedValue` into `TrackMetadata`.
 #[must_use]
 pub fn parse_mpris_metadata_value(val: &OwnedValue) -> Option<TrackMetadata> {
     let Value::Dict(dict) = val.downcast_ref::<Value>().ok()? else {
@@ -254,5 +275,6 @@ pub fn parse_mpris_metadata_value(val: &OwnedValue) -> Option<TrackMetadata> {
         art_url,
         accent_rgb: None,
         duration_ms,
+        position_ms: None,
     })
 }

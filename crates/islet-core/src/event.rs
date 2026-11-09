@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use crate::config::IsletConfig;
 use crate::state::{PlaybackStatus, TrackMetadata};
 
-/// All events that drive the Islet state machine.
+/// All events that drive the Islet state machine and UI layer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IsletEvent {
     /// MPRIS player updated metadata or playback status.
@@ -46,6 +46,8 @@ pub enum IsletEvent {
     AutoCollapse {
         seq: u64,
     },
+    /// Focused Wayland monitor connector changed (e.g. `"DP-1"`, `"eDP-1"`).
+    FocusedMonitorChanged(String),
     /// Hot-reloaded `config.toml`.
     ConfigReloaded(IsletConfig),
     /// Hot-reloaded `style.css`.

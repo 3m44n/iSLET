@@ -26,6 +26,7 @@ pub struct TrackMetadata {
     pub art_url: Option<String>,
     pub accent_rgb: Option<(u8, u8, u8)>,
     pub duration_ms: Option<u64>,
+    pub position_ms: Option<u64>,
 }
 
 /// Slider overlay variants.
@@ -34,7 +35,6 @@ pub enum SliderKind {
     Volume {
         percent: u8,
         muted: bool,
-        /// True when triggered by a mute toggle so the UI plays a shake/pulse animation.
         pulse: bool,
     },
     Brightness {
@@ -76,7 +76,7 @@ impl PillState {
             Self::Media {
                 controls_visible: true,
                 ..
-            } => PillDimensions::new(360.0, 96.0),
+            } => PillDimensions::new(372.0, 108.0),
             Self::Slider(_) => PillDimensions::new(260.0, 44.0),
             Self::Notification { .. } => PillDimensions::new(340.0, 72.0),
         }
@@ -88,7 +88,6 @@ impl PillState {
 pub struct TransitionEffect {
     pub state: PillState,
     pub dimensions: PillDimensions,
-    /// When `Some((seq, duration_ms))`, the caller should schedule `IsletEvent::AutoCollapse { seq }`.
     pub schedule_collapse: Option<(u64, u64)>,
 }
 
@@ -140,13 +139,8 @@ impl PlayerRegistry {
         }
     }
 
-    /// Selects the highest-priority active player:
-    /// 1. Any `Playing` player (most recently updated wins).
-    /// 2. The remembered `last_active_id` if it is `Paused`.
-    /// 3. Most recently active `Paused` player.
     #[must_use]
     pub fn select_active_player(&self) -> Option<(&str, PlaybackStatus, Option<&TrackMetadata>)> {
-        // 1. Prefer Playing players
         if let Some((id, entry)) = self
             .players
             .iter()
@@ -156,7 +150,6 @@ impl PlayerRegistry {
             return Some((id.as_str(), entry.status, entry.metadata.as_ref()));
         }
 
-        // 2. Remembered last active player if Paused
         if let Some(last_id) = &self.last_active_id {
             if let Some(entry) = self.players.get(last_id) {
                 if entry.status == PlaybackStatus::Paused {
@@ -165,7 +158,6 @@ impl PlayerRegistry {
             }
         }
 
-        // 3. Any Paused player
         self.players
             .iter()
             .filter(|(_, e)| e.status == PlaybackStatus::Paused)
@@ -179,7 +171,6 @@ impl PlayerRegistry {
 pub struct StateMachine {
     config: IsletConfig,
     state: PillState,
-    /// State to restore after a temporary override (`Slider` or `Notification`) expires.
     restorable_state: PillState,
     players: PlayerRegistry,
     last_muted: Option<bool>,
@@ -190,7 +181,7 @@ pub struct StateMachine {
 impl StateMachine {
     #[must_use]
     pub fn new(config: IsletConfig) -> Self {
-        let initial = Self:: resting_state_for(&config, None);
+        let initial = Self::resting_state_for(&config, None);
         Self {
             config,
             state: initial.clone(),
@@ -217,7 +208,6 @@ impl StateMachine {
         self.players.select_active_player()
     }
 
-    /// Processes an incoming event and returns the new state, target dimensions, and optional timer.
     pub fn handle_event(&mut self, event: IsletEvent) -> TransitionEffect {
         match event {
             IsletEvent::MprisUpdate {
@@ -236,8 +226,6 @@ impl StateMachine {
                     base_media
                 };
 
-                // If a Slider is currently overriding the pill, keep the slider on screen
-                // and update `restorable_state` so Media restores when the slider finishes.
                 if matches!(self.state, PillState::Slider(_)) {
                     return self.effect(None);
                 }
@@ -259,7 +247,10 @@ impl StateMachine {
                 self.players.remove_player(&player_id);
                 let active_status = self.players.select_active_player().map(|(_, s, _)| s);
                 self.restorable_state = Self::resting_state_for(&self.config, active_status);
-                if !matches!(self.state, PillState::Slider(_) | PillState::Notification { .. }) {
+                if !matches!(
+                    self.state,
+                    PillState::Slider(_) | PillState::Notification { .. }
+                ) {
                     self.state = self.restorable_state.clone();
                 }
                 self.effect(None)
@@ -302,7 +293,6 @@ impl StateMachine {
                 }
 
                 if is_hovering {
-                    // Expand to show media controls on hover.
                     self.bump_seq();
                     self.state = PillState::Media {
                         expanded: true,
@@ -317,7 +307,6 @@ impl StateMachine {
             }
 
             IsletEvent::AutoCollapse { seq } => {
-                // Ignore stale timers that were superseded by a newer event or active hover.
                 if seq != self.collapse_seq || self.hovering {
                     return self.effect(None);
                 }
@@ -343,12 +332,16 @@ impl StateMachine {
                 self.config = new_cfg;
                 let active_status = self.players.select_active_player().map(|(_, s, _)| s);
                 self.restorable_state = Self::resting_state_for(&self.config, active_status);
+                if matches!(self.state, PillState::Idle | PillState::Hidden) {
+                    self.state = self.restorable_state.clone();
+                }
                 self.effect(None)
             }
 
             IsletEvent::SpectrumFrame(_)
             | IsletEvent::PillClicked
             | IsletEvent::PillRightClicked
+            | IsletEvent::FocusedMonitorChanged(_)
             | IsletEvent::CssReloaded(_) => self.effect(None),
         }
     }
@@ -358,7 +351,6 @@ impl StateMachine {
             self.state,
             PillState::Slider(_) | PillState::Notification { .. }
         ) {
-            // If we were in expanded Media, restore to compact/expanded Media rather than losing Media context.
             self.restorable_state = match &self.state {
                 PillState::Media { .. } => PillState::Media {
                     expanded: false,
@@ -370,7 +362,10 @@ impl StateMachine {
     }
 
     fn resting_state_for(config: &IsletConfig, active_status: Option<PlaybackStatus>) -> PillState {
-        if matches!(active_status, Some(PlaybackStatus::Playing | PlaybackStatus::Paused)) {
+        if matches!(
+            active_status,
+            Some(PlaybackStatus::Playing | PlaybackStatus::Paused)
+        ) {
             return PillState::Media {
                 expanded: false,
                 controls_visible: false,

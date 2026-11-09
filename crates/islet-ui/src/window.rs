@@ -1,21 +1,21 @@
-//! Wayland `wlr-layer-shell` window wired to MPRIS2, Audio Volume, Backlight, and FFT Visualizer.
+//! Wayland `wlr-layer-shell` window with multi-monitor binding and hot-reloaded config/CSS.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use gdk4::prelude::*;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use islet_core::{
-    EventBus, IsletConfig, IsletEvent, PillState, PlaybackStatus, StateMachine, DEFAULT_MARGIN_TOP,
-    MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH,
+    EventBus, IsletConfig, IsletEvent, MonitorFollow, PillState, PlaybackStatus, StateMachine,
+    DEFAULT_MARGIN_TOP, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH,
 };
 use islet_sources::{spawn_background_sources, MprisCommand, SourceHandles, VisualizerControl};
 use tracing::{debug, info};
 
 use crate::pill::PillSurface;
 
-/// Constructs the top-center `Overlay` layer-shell window and connects all live system sources.
 pub fn build_overlay_window(app: &adw::Application) {
     let config = IsletConfig::default();
     let window = gtk4::ApplicationWindow::builder()
@@ -41,6 +41,16 @@ pub fn build_overlay_window(app: &adw::Application) {
     window.set_keyboard_mode(KeyboardMode::None);
     window.set_exclusive_zone(0);
 
+    // Dynamic CSS provider for hot-reloaded `style.css`
+    let user_css_provider = gtk4::CssProvider::new();
+    if let Some(display) = gdk4::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &user_css_provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        );
+    }
+
     let EventBus {
         sender,
         mut receiver,
@@ -60,15 +70,15 @@ pub fn build_overlay_window(app: &adw::Application) {
     window.set_child(Some(pill.root_widget()));
     window.present();
 
-    info!("Islet layer-shell window, hardware watchers, and FFT visualizer ready");
+    info!("Islet layer-shell window, hardware watchers, and hot-reload online");
 
     let state_machine = Rc::new(RefCell::new(StateMachine::new(config)));
     let pill_for_loop = Rc::clone(&pill);
     let sender_for_timers = sender;
+    let window_for_loop = window.clone();
 
     glib::spawn_future_local(async move {
         while let Some(event) = receiver.recv().await {
-            // Fast-path spectrum frames so we don't re-trigger spring morphs on 50Hz FFT updates.
             if let IsletEvent::SpectrumFrame(ref bars) = event {
                 pill_for_loop.update_spectrum(bars);
                 continue;
@@ -87,6 +97,25 @@ pub fn build_overlay_window(app: &adw::Application) {
                         let _ = mpris_tx.send(MprisCommand::Raise(player_id.to_owned()));
                     }
                 }
+                IsletEvent::CssReloaded(css) => {
+                    user_css_provider.load_from_string(css);
+                }
+                IsletEvent::FocusedMonitorChanged(connector) => {
+                    if state_machine.borrow().config().monitor_follow == MonitorFollow::Focused {
+                        bind_window_to_connector(&window_for_loop, Some(connector.as_str()));
+                    }
+                }
+                IsletEvent::ConfigReloaded(cfg) => {
+                    window_for_loop.set_margin(Edge::Top, cfg.margin_top.max(0));
+                    pill_for_loop.set_reduce_motion(cfg.reduce_motion);
+                    match &cfg.monitor_follow {
+                        MonitorFollow::Primary => bind_window_to_connector(&window_for_loop, None),
+                        MonitorFollow::Output(name) => {
+                            bind_window_to_connector(&window_for_loop, Some(name.as_str()));
+                        }
+                        MonitorFollow::Focused => {}
+                    }
+                }
                 _ => {}
             }
 
@@ -101,7 +130,6 @@ pub fn build_overlay_window(app: &adw::Application) {
                 (fx, meta, id, status, sm.config().visualizer_bars)
             };
 
-            // Only run FFT & frame-clock visualizer when Media is visible AND actively Playing.
             let viz_active = matches!(effect.state, PillState::Media { .. })
                 && active_status == PlaybackStatus::Playing;
             let _ = visualizer_tx.send(VisualizerControl {
@@ -125,4 +153,34 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
         }
     });
+}
+
+/// Binds the `gtk4-layer-shell` surface to a target monitor by connector name (e.g. `"DP-1"`),
+/// or the primary/first monitor when `target_connector` is `None`.
+fn bind_window_to_connector(window: &gtk4::ApplicationWindow, target_connector: Option<&str>) {
+    let Some(display) = gdk4::Display::default() else {
+        return;
+    };
+    let monitors = display.monitors();
+
+    for i in 0..monitors.n_items() {
+        let Some(obj) = monitors.item(i) else { continue };
+        let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
+            continue;
+        };
+
+        match target_connector {
+            Some(wanted) => {
+                if monitor.connector().as_deref() == Some(wanted) {
+                    window.set_monitor(Some(&monitor));
+                    info!(connector = wanted, "Moved Islet overlay to target monitor");
+                    return;
+                }
+            }
+            None => {
+                window.set_monitor(Some(&monitor));
+                return;
+            }
+        }
+    }
 }
