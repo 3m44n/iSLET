@@ -1,4 +1,4 @@
-//! Animated pill container with Media HUD (album art, marquee title, controls) and Volume/Brightness Sliders.
+//! Animated pill container with Media HUD, FFT Spectrum Visualizer, and Volume/Brightness Sliders.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -15,28 +15,28 @@ use islet_sources::MprisCommand;
 use tokio::sync::mpsc;
 use tracing::trace;
 
-/// Manages the visual pill widget, cross-fading stack views, marquee text, and Cairo input-region mask.
+use crate::visualizer_widget::SpectrumWidget;
+
+/// Manages the visual pill widget, cross-fading stack views, marquee text, spectrum visualizer, and input mask.
 pub struct PillSurface {
     outer_box: gtk4::Box,
     pill_frame: gtk4::Box,
     view_stack: gtk4::Stack,
-    // Idle view
     idle_label: gtk4::Label,
-    // Media view
     art_picture: gtk4::Picture,
     title_label: gtk4::Label,
     artist_label: gtk4::Label,
+    spectrum: SpectrumWidget,
     controls_box: gtk4::Box,
     play_pause_btn: gtk4::Button,
     active_player_id: Rc<RefCell<Option<String>>>,
     full_title: Rc<RefCell<String>>,
     marquee_offset: Rc<Cell<usize>>,
     marquee_pause_ticks: Rc<Cell<u8>>,
-    // Slider view (Volume / Brightness)
+    marquee_running: Rc<Cell<bool>>,
     slider_icon: gtk4::Label,
     slider_bar: gtk4::ProgressBar,
     slider_pct_label: gtk4::Label,
-    // Geometry & spring animation
     current_dims: Rc<Cell<PillDimensions>>,
     spring_anim: adw::SpringAnimation,
     start_dims: Rc<Cell<PillDimensions>>,
@@ -49,6 +49,7 @@ impl PillSurface {
         window: &gtk4::ApplicationWindow,
         sender: EventSender,
         mpris_tx: mpsc::UnboundedSender<MprisCommand>,
+        visualizer_bars: usize,
     ) -> Self {
         let initial = PillDimensions::IDLE;
         let current_dims = Rc::new(Cell::new(initial));
@@ -88,7 +89,7 @@ impl PillSurface {
             .build();
         view_stack.add_named(&idle_label, Some("idle"));
 
-        // --- 2. Media View (Album Art + Marquee Title/Artist + Hover Controls) ---
+        // --- 2. Media View (Album Art + Marquee Title/Artist + FFT Spectrum Bars + Controls) ---
         let media_root = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .valign(gtk4::Align::Center)
@@ -133,10 +134,13 @@ impl PillSurface {
 
         text_col.append(&title_label);
         text_col.append(&artist_label);
+
+        let spectrum = SpectrumWidget::new(visualizer_bars);
+
         media_top_row.append(&art_picture);
         media_top_row.append(&text_col);
+        media_top_row.append(spectrum.widget());
 
-        // Transport controls shown on hover
         let controls_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .halign(gtk4::Align::Center)
@@ -217,7 +221,7 @@ impl PillSurface {
         pill_frame.append(&view_stack);
         outer_box.append(&pill_frame);
 
-        // Left-click (Play/Pause) and Right-click (Raise window) gestures
+        // Gestures
         let left_tx = sender.clone();
         let left_click = gtk4::GestureClick::builder().button(1).build();
         left_click.connect_released(move |_, _, _, _| {
@@ -232,7 +236,6 @@ impl PillSurface {
         });
         pill_frame.add_controller(right_click);
 
-        // Hover controller
         let hover_enter_tx = sender.clone();
         let hover_leave_tx = sender;
         let motion_ctrl = gtk4::EventControllerMotion::new();
@@ -244,50 +247,11 @@ impl PillSurface {
         });
         pill_frame.add_controller(motion_ctrl);
 
-        // Marquee text scroller (scrolls titles > 24 chars with pause at ends)
         let full_title = Rc::new(RefCell::new(String::new()));
         let marquee_offset = Rc::new(Cell::new(0_usize));
         let marquee_pause_ticks = Rc::new(Cell::new(8_u8));
-        {
-            let title_lbl = title_label.clone();
-            let full_ref = Rc::clone(&full_title);
-            let offset_ref = Rc::clone(&marquee_offset);
-            let pause_ref = Rc::clone(&marquee_pause_ticks);
+        let marquee_running = Rc::new(Cell::new(false));
 
-            glib::timeout_add_local(Duration::from_millis(180), move || {
-                let text = full_ref.borrow();
-                let chars: Vec<char> = text.chars().collect();
-                const WINDOW_CHARS: usize = 24;
-
-                if chars.len() <= WINDOW_CHARS {
-                    return glib::ControlFlow::Continue;
-                }
-
-                let pause = pause_ref.get();
-                if pause > 0 {
-                    pause_ref.set(pause - 1);
-                    return glib::ControlFlow::Continue;
-                }
-
-                let next_off = offset_ref.get() + 1;
-                if next_off + WINDOW_CHARS > chars.len() {
-                    offset_ref.set(0);
-                    pause_ref.set(10); // Pause at end before wrapping
-                    let slice: String = chars.iter().take(WINDOW_CHARS).collect();
-                    title_lbl.set_label(&slice);
-                } else {
-                    offset_ref.set(next_off);
-                    if next_off + WINDOW_CHARS == chars.len() {
-                        pause_ref.set(8);
-                    }
-                    let slice: String = chars.iter().skip(next_off).take(WINDOW_CHARS).collect();
-                    title_lbl.set_label(&slice);
-                }
-                glib::ControlFlow::Continue
-            });
-        }
-
-        // Interruptible SpringAnimation for pill width/height morphing
         let dims_for_cb = Rc::clone(&current_dims);
         let start_for_cb = Rc::clone(&start_dims);
         let target_for_cb = Rc::clone(&target_dims);
@@ -329,12 +293,14 @@ impl PillSurface {
             art_picture,
             title_label,
             artist_label,
+            spectrum,
             controls_box,
             play_pause_btn,
             active_player_id,
             full_title,
             marquee_offset,
             marquee_pause_ticks,
+            marquee_running,
             slider_icon,
             slider_bar,
             slider_pct_label,
@@ -350,24 +316,35 @@ impl PillSurface {
         &self.outer_box
     }
 
-    /// Updates the pill's active view, metadata, slider fill, and smoothly retargets the morph spring.
+    /// Feeds a new FFT spectrum frame to the Cairo bar widget.
+    pub fn update_spectrum(&self, bars: &[f32]) {
+        self.spectrum.set_target_frame(bars);
+    }
+
+    /// Updates the pill's active view, metadata, visualizer state, and smoothly retargets the morph spring.
     pub fn apply_transition(
         &self,
         effect: &TransitionEffect,
         player_id: Option<&str>,
         status: PlaybackStatus,
         metadata: Option<&TrackMetadata>,
+        visualizer_active: bool,
     ) {
         *self.active_player_id.borrow_mut() = player_id.map(str::to_owned);
         self.start_dims.set(self.current_dims.get());
         self.target_dims.set(effect.dimensions);
         self.pill_frame.remove_css_class("mute-pulse");
 
+        // Start/stop frame-clock visualizer tick callback (0% CPU when not playing or hidden).
+        self.spectrum.set_running(visualizer_active);
+
         match &effect.state {
             PillState::Hidden => {
+                self.stop_marquee();
                 self.pill_frame.set_opacity(0.0);
             }
             PillState::Idle => {
+                self.stop_marquee();
                 self.pill_frame.set_opacity(1.0);
                 self.pill_frame.remove_css_class("expanded");
                 self.idle_label.set_label("●  Islet");
@@ -394,6 +371,7 @@ impl PillSurface {
                 self.artist_label.set_visible(*expanded || *controls_visible);
 
                 if let Some(meta) = metadata {
+                    self.spectrum.set_accent_color(meta.accent_rgb);
                     let mut current_full = self.full_title.borrow_mut();
                     if *current_full != meta.title {
                         *current_full = meta.title.clone();
@@ -406,6 +384,10 @@ impl PillSurface {
                     if let Some(ref art_path) = meta.art_url {
                         self.art_picture.set_filename(Some(art_path));
                     }
+                    drop(current_full);
+                    self.ensure_marquee_if_needed(status == PlaybackStatus::Playing);
+                } else {
+                    self.stop_marquee();
                 }
                 self.view_stack.set_visible_child_name("media");
             }
@@ -414,6 +396,7 @@ impl PillSurface {
                 muted,
                 pulse,
             }) => {
+                self.stop_marquee();
                 self.pill_frame.set_opacity(1.0);
                 self.pill_frame.add_css_class("expanded");
                 if *pulse {
@@ -428,13 +411,17 @@ impl PillSurface {
                     "🔊"
                 };
                 self.slider_icon.set_label(icon);
-                self.slider_bar
-                    .set_fraction(if *muted { 0.0 } else { (f64::from(*percent) / 100.0).clamp(0.0, 1.0) });
+                self.slider_bar.set_fraction(if *muted {
+                    0.0
+                } else {
+                    (f64::from(*percent) / 100.0).clamp(0.0, 1.0)
+                });
                 self.slider_pct_label
                     .set_label(&if *muted { "Mute".to_owned() } else { format!("{percent}%") });
                 self.view_stack.set_visible_child_name("slider");
             }
             PillState::Slider(SliderKind::Brightness { percent }) => {
+                self.stop_marquee();
                 self.pill_frame.set_opacity(1.0);
                 self.pill_frame.add_css_class("expanded");
                 self.slider_icon.set_label("☀️");
@@ -444,6 +431,7 @@ impl PillSurface {
                 self.view_stack.set_visible_child_name("slider");
             }
             PillState::Notification { title, body } => {
+                self.stop_marquee();
                 self.pill_frame.set_opacity(1.0);
                 self.pill_frame.add_css_class("expanded");
                 self.idle_label.set_label(&format!("🔔 {title} — {body}"));
@@ -454,6 +442,64 @@ impl PillSurface {
         let current_velocity = self.spring_anim.velocity();
         self.spring_anim.set_initial_velocity(current_velocity);
         self.spring_anim.play();
+    }
+
+    /// Runs the marquee timer only when a long title (> 20 chars) is actively playing.
+    fn ensure_marquee_if_needed(&self, is_playing: bool) {
+        const WINDOW_CHARS: usize = 20;
+        let needs_scroll = is_playing && self.full_title.borrow().chars().count() > WINDOW_CHARS;
+        if !needs_scroll {
+            self.stop_marquee();
+            return;
+        }
+        if self.marquee_running.get() {
+            return;
+        }
+        self.marquee_running.set(true);
+
+        let running_flag = Rc::clone(&self.marquee_running);
+        let title_lbl = self.title_label.clone();
+        let full_ref = Rc::clone(&self.full_title);
+        let offset_ref = Rc::clone(&self.marquee_offset);
+        let pause_ref = Rc::clone(&self.marquee_pause_ticks);
+
+        glib::timeout_add_local(Duration::from_millis(180), move || {
+            if !running_flag.get() {
+                return glib::ControlFlow::Break;
+            }
+            let text = full_ref.borrow();
+            let chars: Vec<char> = text.chars().collect();
+            if chars.len() <= WINDOW_CHARS {
+                running_flag.set(false);
+                return glib::ControlFlow::Break;
+            }
+
+            let pause = pause_ref.get();
+            if pause > 0 {
+                pause_ref.set(pause - 1);
+                return glib::ControlFlow::Continue;
+            }
+
+            let next_off = offset_ref.get() + 1;
+            if next_off + WINDOW_CHARS > chars.len() {
+                offset_ref.set(0);
+                pause_ref.set(10);
+                let slice: String = chars.iter().take(WINDOW_CHARS).collect();
+                title_lbl.set_label(&slice);
+            } else {
+                offset_ref.set(next_off);
+                if next_off + WINDOW_CHARS == chars.len() {
+                    pause_ref.set(8);
+                }
+                let slice: String = chars.iter().skip(next_off).take(WINDOW_CHARS).collect();
+                title_lbl.set_label(&slice);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    fn stop_marquee(&self) {
+        self.marquee_running.set(false);
     }
 }
 

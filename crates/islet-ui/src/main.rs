@@ -1,6 +1,7 @@
-//! Islet Wayland Overlay Daemon — Entry Point (Milestone 1 Skeleton).
+//! Islet Wayland Overlay Daemon — Entry Point.
 
 mod pill;
+mod visualizer_widget;
 mod window;
 
 use glib::ExitCode;
@@ -17,7 +18,7 @@ fn main() -> ExitCode {
         )
         .init();
 
-    info!("Starting Islet Wayland overlay daemon (Milestone 1 Skeleton)");
+    info!("Starting Islet Wayland overlay daemon");
 
     let app = adw::Application::builder().application_id(APP_ID).build();
 
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
     app.run()
 }
 
-/// Loads `assets/style.css` (or `$XDG_CONFIG_HOME/islet/style.css` fallback) into the default display.
+/// Loads `assets/style.css` into the default display.
 fn load_stylesheet() {
     let Some(display) = gdk4::Display::default() else {
         tracing::warn!("No default GDK display found while loading CSS");

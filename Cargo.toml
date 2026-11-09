@@ -25,11 +25,12 @@ thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 
-# D-Bus, System & Media Sources
+# D-Bus, System, DSP & Media Sources
 zbus = { version = "4.2", default-features = false, features = ["tokio"] }
 inotify = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 color-thief = "0.2"
+rustfft = "6.2"
 
 # UI & Wayland Layer Shell
 gtk4 = { version = "0.8", features = ["v4_12"] }

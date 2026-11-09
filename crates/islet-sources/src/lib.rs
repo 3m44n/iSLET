@@ -1,21 +1,28 @@
-//! Event-driven background sources for Islet (MPRIS2, Audio Volume, Backlight Brightness).
+//! Event-driven background sources for Islet (MPRIS2, Audio Volume, Backlight, and FFT Visualizer).
 
 pub mod art;
 pub mod audio;
 pub mod backlight;
 pub mod mpris;
+pub mod visualizer;
 
 use islet_core::EventSender;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub use mpris::MprisCommand;
+pub use visualizer::VisualizerControl;
 
-/// Starts all background hardware/D-Bus event listeners on a dedicated Tokio runtime thread.
+/// Handles returned to the UI layer for controlling MPRIS players and pausing/resuming the FFT visualizer.
+pub struct SourceHandles {
+    pub mpris_tx: mpsc::UnboundedSender<MprisCommand>,
+    pub visualizer_tx: watch::Sender<VisualizerControl>,
+}
+
+/// Starts all background hardware/D-Bus/FFT event listeners on a dedicated Tokio runtime thread.
 #[must_use]
-pub fn spawn_background_sources(
-    sender: EventSender,
-) -> mpsc::UnboundedSender<MprisCommand> {
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
+    let (mpris_tx, mpris_rx) = mpsc::unbounded_channel();
+    let (visualizer_tx, visualizer_rx) = watch::channel(VisualizerControl::default());
 
     std::thread::Builder::new()
         .name("islet-sources-rt".into())
@@ -29,20 +36,25 @@ pub fn spawn_background_sources(
             };
 
             rt.block_on(async move {
-                let mpris_tx = sender.clone();
-                let audio_tx = sender.clone();
-                let bright_tx = sender;
+                let mpris_sender = sender.clone();
+                let audio_sender = sender.clone();
+                let bright_sender = sender.clone();
+                let viz_sender = sender;
 
                 tokio::join!(
-                    mpris::run_mpris_watcher(mpris_tx, cmd_rx),
-                    audio::run_audio_watcher(audio_tx),
-                    backlight::run_backlight_watcher(bright_tx),
+                    mpris::run_mpris_watcher(mpris_sender, mpris_rx),
+                    audio::run_audio_watcher(audio_sender),
+                    backlight::run_backlight_watcher(bright_sender),
+                    visualizer::run_visualizer(viz_sender, visualizer_rx),
                 );
             });
         })
         .ok();
 
-    cmd_tx
+    SourceHandles {
+        mpris_tx,
+        visualizer_tx,
+    }
 }
 
 #[cfg(test)]
@@ -51,8 +63,11 @@ mod tests {
     use super::audio::{parse_pactl_volume_and_mute, parse_wpctl_volume};
     use super::backlight::parse_brightness_percent;
     use super::mpris::{parse_mpris_metadata_value, parse_playback_status};
+    use super::visualizer::{compute_fft_bars, procedural_spectrum_frame};
     use islet_core::PlaybackStatus;
+    use rustfft::FftPlanner;
     use std::collections::HashMap;
+    use std::f32::consts::PI;
     use zbus::zvariant::{OwnedValue, Value};
 
     #[test]
@@ -115,5 +130,25 @@ mod tests {
         assert_eq!(parse_brightness_percent("240", 240), Some(100));
         assert_eq!(parse_brightness_percent("0", 240), Some(0));
         assert_eq!(parse_brightness_percent("100", 0), None);
+    }
+
+    #[test]
+    fn test_fft_spectrum_downsampling_and_procedural_fallback() {
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(1024);
+
+        // Generate a 440 Hz sine wave at 48 kHz sample rate
+        let samples: Vec<f32> = (0..1024)
+            .map(|i| (2.0 * PI * 440.0 * (i as f32) / 48_000.0).sin())
+            .collect();
+
+        let bars = compute_fft_bars(&samples, fft.as_ref(), 16);
+        assert_eq!(bars.len(), 16);
+        assert!(bars.iter().any(|&v| v > 0.25));
+        assert!(bars.iter().all(|&v| (0.0..=1.0).contains(&v)));
+
+        let fallback = procedural_spectrum_frame(1.2, 16);
+        assert_eq!(fallback.len(), 16);
+        assert!(fallback.iter().all(|&v| (0.0..=1.0).contains(&v)));
     }
 }

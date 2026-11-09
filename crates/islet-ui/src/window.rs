@@ -1,4 +1,4 @@
-//! Wayland `wlr-layer-shell` window wired to MPRIS2, Audio Volume, and Backlight sources.
+//! Wayland `wlr-layer-shell` window wired to MPRIS2, Audio Volume, Backlight, and FFT Visualizer.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -7,10 +7,10 @@ use std::time::Duration;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use islet_core::{
-    EventBus, IsletConfig, IsletEvent, StateMachine, DEFAULT_MARGIN_TOP, MAX_SURFACE_HEIGHT,
-    MAX_SURFACE_WIDTH,
+    EventBus, IsletConfig, IsletEvent, PillState, PlaybackStatus, StateMachine, DEFAULT_MARGIN_TOP,
+    MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH,
 };
-use islet_sources::{spawn_background_sources, MprisCommand};
+use islet_sources::{spawn_background_sources, MprisCommand, SourceHandles, VisualizerControl};
 use tracing::{debug, info};
 
 use crate::pill::PillSurface;
@@ -46,18 +46,21 @@ pub fn build_overlay_window(app: &adw::Application) {
         mut receiver,
     } = EventBus::new();
 
-    // Start real MPRIS2, PipeWire/pactl Volume, and Backlight inotify sources.
-    let mpris_cmd_tx = spawn_background_sources(sender.clone());
+    let SourceHandles {
+        mpris_tx,
+        visualizer_tx,
+    } = spawn_background_sources(sender.clone());
 
     let pill = Rc::new(PillSurface::new(
         &window,
         sender.clone(),
-        mpris_cmd_tx.clone(),
+        mpris_tx.clone(),
+        config.visualizer_bars,
     ));
     window.set_child(Some(pill.root_widget()));
     window.present();
 
-    info!("Islet layer-shell window and live hardware/MPRIS sources online");
+    info!("Islet layer-shell window, hardware watchers, and FFT visualizer ready");
 
     let state_machine = Rc::new(RefCell::new(StateMachine::new(config)));
     let pill_for_loop = Rc::clone(&pill);
@@ -65,39 +68,53 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     glib::spawn_future_local(async move {
         while let Some(event) = receiver.recv().await {
+            // Fast-path spectrum frames so we don't re-trigger spring morphs on 50Hz FFT updates.
+            if let IsletEvent::SpectrumFrame(ref bars) = event {
+                pill_for_loop.update_spectrum(bars);
+                continue;
+            }
+
             debug!(?event, "Processing IsletEvent");
 
-            // Handle left/right clicks on the active MPRIS player before state transition.
             match &event {
                 IsletEvent::PillClicked => {
                     if let Some((player_id, _, _)) = state_machine.borrow().active_player() {
-                        let _ = mpris_cmd_tx.send(MprisCommand::PlayPause(player_id.to_owned()));
+                        let _ = mpris_tx.send(MprisCommand::PlayPause(player_id.to_owned()));
                     }
                 }
                 IsletEvent::PillRightClicked => {
                     if let Some((player_id, _, _)) = state_machine.borrow().active_player() {
-                        let _ = mpris_cmd_tx.send(MprisCommand::Raise(player_id.to_owned()));
+                        let _ = mpris_tx.send(MprisCommand::Raise(player_id.to_owned()));
                     }
                 }
                 _ => {}
             }
 
-            let (effect, active_meta, active_id, active_status) = {
+            let (effect, active_meta, active_id, active_status, bars_cfg) = {
                 let mut sm = state_machine.borrow_mut();
                 let fx = sm.handle_event(event);
                 let (id, status, meta) = sm
                     .active_player()
-                    .map_or((None, islet_core::PlaybackStatus::Stopped, None), |(i, s, m)| {
+                    .map_or((None, PlaybackStatus::Stopped, None), |(i, s, m)| {
                         (Some(i.to_owned()), s, m.cloned())
                     });
-                (fx, meta, id, status)
+                (fx, meta, id, status, sm.config().visualizer_bars)
             };
+
+            // Only run FFT & frame-clock visualizer when Media is visible AND actively Playing.
+            let viz_active = matches!(effect.state, PillState::Media { .. })
+                && active_status == PlaybackStatus::Playing;
+            let _ = visualizer_tx.send(VisualizerControl {
+                active: viz_active,
+                bars: bars_cfg,
+            });
 
             pill_for_loop.apply_transition(
                 &effect,
                 active_id.as_deref(),
                 active_status,
                 active_meta.as_ref(),
+                viz_active,
             );
 
             if let Some((seq, timeout_ms)) = effect.schedule_collapse {
