@@ -18,11 +18,18 @@ description = "Dynamic Island / Floating Media HUD for wlroots and Smithay Wayla
 [workspace.dependencies]
 # Core & Async
 tokio = { version = "1.37", features = ["rt", "sync", "time", "net", "io-util", "macros", "fs", "process"] }
+futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+
+# D-Bus, System & Media Sources
+zbus = { version = "4.2", default-features = false, features = ["tokio"] }
+inotify = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+color-thief = "0.2"
 
 # UI & Wayland Layer Shell
 gtk4 = { version = "0.8", features = ["v4_12"] }

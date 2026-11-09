@@ -8,5 +8,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+color-thief.workspace = true
+futures-util.workspace = true
+image.workspace = true
+inotify.workspace = true
 islet-core.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+zbus.workspace = true
