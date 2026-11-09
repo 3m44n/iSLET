@@ -1,4 +1,4 @@
-/* Islet — Default Dark Glass Theme (Milestone 1) */
+/* Islet — Default Dark Glass Theme (Milestones 3 & 4: Media + Sliders) */
 
 window.islet-window,
 window.islet-window > contents {
@@ -8,17 +8,18 @@ window.islet-window > contents {
 }
 
 .islet-pill {
-    background-color: rgba(14, 14, 18, 0.92);
+    background-color: rgba(14, 14, 18, 0.93);
     border-radius: 9999px;
     border: 1px solid rgba(255, 255, 255, 0.11);
     box-shadow:
         0 8px 20px rgba(0, 0, 0, 0.45),
         0 2px 6px rgba(0, 0, 0, 0.30);
-    padding: 0 14px;
+    padding: 6px 16px;
     transition:
         background-color 260ms cubic-bezier(0.22, 1, 0.36, 1),
         border-color 260ms cubic-bezier(0.22, 1, 0.36, 1),
-        box-shadow 260ms cubic-bezier(0.22, 1, 0.36, 1);
+        box-shadow 260ms cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 220ms ease-out;
 }
 
 .islet-pill.expanded {
@@ -26,7 +27,19 @@ window.islet-window > contents {
     border-color: rgba(255, 255, 255, 0.18);
     box-shadow:
         0 12px 28px rgba(0, 0, 0, 0.55),
-        0 0 18px rgba(137, 180, 250, 0.18);
+        0 0 18px rgba(137, 180, 250, 0.22);
+}
+
+@keyframes mute-shake {
+    0%   { transform: scale(1.0); }
+    30%  { transform: scale(1.05); }
+    65%  { transform: scale(0.97); }
+    100% { transform: scale(1.0); }
+}
+
+.islet-pill.mute-pulse {
+    animation: mute-shake 260ms ease-out;
+    border-color: rgba(243, 139, 168, 0.55);
 }
 
 .islet-label {
@@ -34,6 +47,57 @@ window.islet-window > contents {
     font-family: "Inter", "Cantarell", system-ui, sans-serif;
     font-size: 12.5px;
     font-weight: 600;
-    letter-spacing: 0.2px;
-    transition: opacity 200ms ease-out;
+}
+
+.islet-art {
+    border-radius: 10px;
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.islet-title {
+    color: #f5e0dc;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.islet-artist {
+    color: #a6adc8;
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+.islet-ctrl-btn {
+    background: rgba(255, 255, 255, 0.08);
+    color: #cdd6f4;
+    border-radius: 999px;
+    border: none;
+    padding: 3px 10px;
+    font-size: 12px;
+}
+
+.islet-ctrl-btn:hover {
+    background: rgba(137, 180, 250, 0.25);
+}
+
+.islet-slider-icon {
+    font-size: 15px;
+}
+
+.islet-slider-bar trough {
+    min-height: 7px;
+    border-radius: 999px;
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.islet-slider-bar progress {
+    min-height: 7px;
+    border-radius: 999px;
+    background-color: #89b4fa;
+    transition: all 140ms ease-out;
+}
+
+.islet-slider-pct {
+    color: #cdd6f4;
+    font-size: 12px;
+    font-weight: 600;
 }
