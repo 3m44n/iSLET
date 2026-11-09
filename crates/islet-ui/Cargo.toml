@@ -1,0 +1,25 @@
+[package]
+name = "islet-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "islet"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+adw.workspace = true
+cairo-rs.workspace = true
+gdk4.workspace = true
+gio.workspace = true
+glib.workspace = true
+gtk4.workspace = true
+gtk4-layer-shell.workspace = true
+islet-core.workspace = true
+islet-sources.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

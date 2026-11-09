@@ -1,0 +1,11 @@
+[package]
+name = "islet-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+islet-core.workspace = true

@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/islet-core",
+    "crates/islet-ui",
+    "crates/islet-sources",
+    "crates/islet-ctl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+authors = ["Islet Contributors"]
+description = "Dynamic Island / Floating Media HUD for wlroots and Smithay Wayland compositors"
+
+[workspace.dependencies]
+# Core & Async
+tokio = { version = "1.37", features = ["rt", "sync", "time", "net", "io-util", "macros", "fs", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# UI & Wayland Layer Shell
+gtk4 = { version = "0.8", features = ["v4_12"] }
+gtk4-layer-shell = "0.3"
+adw = { package = "libadwaita", version = "0.6", features = ["v1_4"] }
+cairo-rs = { version = "0.19", features = ["v1_16"] }
+gdk4 = "0.8"
+glib = "0.19"
+gio = "0.19"
+
+# Internal crates
+islet-core = { path = "crates/islet-core" }
+islet-sources = { path = "crates/islet-sources" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+module_name_repetitions = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
