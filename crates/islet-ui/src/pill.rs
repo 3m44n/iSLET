@@ -1,11 +1,12 @@
 //! Animated pill container with dominant-color glow, hover seek bar, idle clock, and `reduce_motion` support.
 
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use adw::prelude::*;
-use cairo::{Context, Format, ImageSurface, Region};
+use cairo::{RectangleInt, Region};
+use gdk4::prelude::*;
 use gtk4::prelude::*;
 use islet_core::{
     EventSender, IsletEvent, PillDimensions, PillState, PlaybackStatus, SliderKind, TrackMetadata,
@@ -29,6 +30,7 @@ pub struct PillSurface {
     controls_box: gtk4::Box,
     play_pause_btn: gtk4::Button,
     seek_scale: gtk4::Scale,
+    updating_seek: Rc<Cell<bool>>,
     accent_provider: gtk4::CssProvider,
     active_player_id: Rc<RefCell<Option<String>>>,
     full_title: Rc<RefCell<String>>,
@@ -40,9 +42,10 @@ pub struct PillSurface {
     slider_bar: gtk4::ProgressBar,
     slider_pct_label: gtk4::Label,
     current_dims: Rc<Cell<PillDimensions>>,
-    spring_anim: adw::SpringAnimation,
-    start_dims: Rc<Cell<PillDimensions>>,
     target_dims: Rc<Cell<PillDimensions>>,
+    vel_w: Rc<Cell<f64>>,
+    vel_h: Rc<Cell<f64>>,
+    anim_tick_id: Rc<RefCell<Option<gtk4::TickCallbackId>>>,
     window: gtk4::ApplicationWindow,
 }
 
@@ -56,12 +59,14 @@ impl PillSurface {
     ) -> Self {
         let initial = PillDimensions::IDLE;
         let current_dims = Rc::new(Cell::new(initial));
-        let start_dims = Rc::new(Cell::new(initial));
         let target_dims = Rc::new(Cell::new(initial));
+        let vel_w = Rc::new(Cell::new(0.0_f64));
+        let vel_h = Rc::new(Cell::new(0.0_f64));
+        let anim_tick_id = Rc::new(RefCell::new(None));
         let active_player_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let reduce_motion = Rc::new(Cell::new(false));
+        let updating_seek = Rc::new(Cell::new(false));
 
-        // Dynamic CSS provider for dominant-color album art glow
         let accent_provider = gtk4::CssProvider::new();
         if let Some(display) = gdk4::Display::default() {
             gtk4::style_context_add_provider_for_display(
@@ -94,7 +99,7 @@ impl PillSurface {
             .vexpand(true)
             .build();
 
-        // --- 1. Idle View (compact dot + time) ---
+        // --- 1. Idle View ---
         let idle_label = gtk4::Label::builder()
             .label(&format!("●  {}", current_hh_mm()))
             .halign(gtk4::Align::Center)
@@ -103,7 +108,7 @@ impl PillSurface {
             .build();
         view_stack.add_named(&idle_label, Some("idle"));
 
-        // --- 2. Media View (Album Art + Marquee Title/Artist + FFT Spectrum + Hover Seek/Controls) ---
+        // --- 2. Media View ---
         let media_root = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .valign(gtk4::Align::Center)
@@ -155,7 +160,6 @@ impl PillSurface {
         media_top_row.append(&text_col);
         media_top_row.append(spectrum.widget());
 
-        // Hover controls: Prev / Play-Pause / Next + Interactive Seek Bar
         let controls_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .halign(gtk4::Align::Fill)
@@ -203,14 +207,23 @@ impl PillSurface {
 
         let pid_seek = Rc::clone(&active_player_id);
         let tx_seek = mpris_tx;
-        seek_scale.connect_change_value(move |scale, _, new_val| {
-            let delta_pct = new_val - scale.value();
-            if let Some(id) = pid_seek.borrow().clone() {
-                // Seek relative by 5s per 10% scrub step
-                let offset_us = (delta_pct * 500_000.0) as i64;
-                let _ = tx_seek.send(MprisCommand::SeekRelativeUs(id, offset_us));
+        let updating_seek_cb = Rc::clone(&updating_seek);
+        let last_seek_pct = Rc::new(Cell::new(0.0_f64));
+        let last_seek_for_cb = Rc::clone(&last_seek_pct);
+        seek_scale.connect_value_changed(move |scale| {
+            if updating_seek_cb.get() {
+                last_seek_for_cb.set(scale.value());
+                return;
             }
-            glib::Propagation::Proceed
+            let new_val = scale.value();
+            let delta_pct = new_val - last_seek_for_cb.get();
+            last_seek_for_cb.set(new_val);
+            if delta_pct.abs() > 1.0 {
+                if let Some(id) = pid_seek.borrow().clone() {
+                    let offset_us = (delta_pct * 500_000.0) as i64;
+                    let _ = tx_seek.send(MprisCommand::SeekRelativeUs(id, offset_us));
+                }
+            }
         });
 
         controls_box.append(&prev_btn);
@@ -286,29 +299,6 @@ impl PillSurface {
         let marquee_pause_ticks = Rc::new(Cell::new(8_u8));
         let marquee_running = Rc::new(Cell::new(false));
 
-        let dims_for_cb = Rc::clone(&current_dims);
-        let start_for_cb = Rc::clone(&start_dims);
-        let target_for_cb = Rc::clone(&target_dims);
-        let pill_for_cb = pill_frame.clone();
-        let window_weak = window.downgrade();
-
-        let anim_target = adw::CallbackAnimationTarget::new(move |progress| {
-            let interpolated = start_for_cb.get().lerp(target_for_cb.get(), progress);
-            dims_for_cb.set(interpolated);
-
-            pill_for_cb.set_width_request(interpolated.width.round() as i32);
-            pill_for_cb.set_height_request(interpolated.height.round() as i32);
-
-            if let Some(win) = window_weak.upgrade() {
-                update_wayland_input_region(&win, interpolated);
-            }
-        });
-
-        let spring_params = adw::SpringParams::new(0.88, 1.0, 260.0);
-        let spring_anim =
-            adw::SpringAnimation::new(&pill_frame, 0.0, 1.0, spring_params, anim_target);
-        spring_anim.set_clamp(false);
-
         let dims_on_map = Rc::clone(&current_dims);
         window.connect_map(move |win| {
             update_wayland_input_region(win, dims_on_map.get());
@@ -331,6 +321,7 @@ impl PillSurface {
             controls_box,
             play_pause_btn,
             seek_scale,
+            updating_seek,
             accent_provider,
             active_player_id,
             full_title,
@@ -342,9 +333,10 @@ impl PillSurface {
             slider_bar,
             slider_pct_label,
             current_dims,
-            spring_anim,
-            start_dims,
             target_dims,
+            vel_w,
+            vel_h,
+            anim_tick_id,
             window: window.clone(),
         }
     }
@@ -358,7 +350,6 @@ impl PillSurface {
         self.spectrum.set_target_frame(bars);
     }
 
-    /// Toggles `reduce_motion` mode from `config.toml`.
     pub fn set_reduce_motion(&self, enabled: bool) {
         self.reduce_motion.set(enabled);
         self.view_stack.set_transition_type(if enabled {
@@ -377,7 +368,6 @@ impl PillSurface {
         visualizer_active: bool,
     ) {
         *self.active_player_id.borrow_mut() = player_id.map(str::to_owned);
-        self.start_dims.set(self.current_dims.get());
         self.target_dims.set(effect.dimensions);
         self.pill_frame.remove_css_class("mute-pulse");
 
@@ -424,7 +414,9 @@ impl PillSurface {
                     if let (Some(pos), Some(dur)) = (meta.position_ms, meta.duration_ms) {
                         if dur > 0 {
                             let pct = ((pos as f64 / dur as f64) * 100.0).clamp(0.0, 100.0);
+                            self.updating_seek.set(true);
                             self.seek_scale.set_value(pct);
+                            self.updating_seek.set(false);
                         }
                     }
 
@@ -438,7 +430,7 @@ impl PillSurface {
                     self.artist_label.set_label(&meta.artist);
 
                     if let Some(ref art_path) = meta.art_url {
-                        self.art_picture.set_filename(Some(art_path));
+                        self.art_picture.set_filename(Some(Path::new(art_path)));
                     }
                     drop(current_full);
                     self.ensure_marquee_if_needed(
@@ -498,7 +490,11 @@ impl PillSurface {
         }
 
         if self.reduce_motion.get() {
-            self.spring_anim.pause();
+            if let Some(id) = self.anim_tick_id.borrow_mut().take() {
+                id.remove();
+            }
+            self.vel_w.set(0.0);
+            self.vel_h.set(0.0);
             self.current_dims.set(effect.dimensions);
             self.pill_frame
                 .set_width_request(effect.dimensions.width.round() as i32);
@@ -506,17 +502,94 @@ impl PillSurface {
                 .set_height_request(effect.dimensions.height.round() as i32);
             update_wayland_input_region(&self.window, effect.dimensions);
         } else {
-            let current_velocity = self.spring_anim.velocity();
-            self.spring_anim.set_initial_velocity(current_velocity);
-            self.spring_anim.play();
+            self.start_spring_morph();
         }
     }
 
-    /// Injects dynamic CSS rules so the pill and album art glow softly in the album's dominant color.
+    /// Runs a velocity-preserving critically damped spring morph on the GTK4 frame clock.
+    /// Automatically unregisters the tick callback once settled so idle CPU is 0%.
+    fn start_spring_morph(&self) {
+        if self.anim_tick_id.borrow().is_some() {
+            // Already running; updated `self.target_dims` will be picked up seamlessly on the next frame!
+            return;
+        }
+
+        let current_ref = Rc::clone(&self.current_dims);
+        let target_ref = Rc::clone(&self.target_dims);
+        let vel_w_ref = Rc::clone(&self.vel_w);
+        let vel_h_ref = Rc::clone(&self.vel_h);
+        let tick_slot = Rc::clone(&self.anim_tick_id);
+        let window_weak = self.window.downgrade();
+        let last_us = Cell::new(0_i64);
+
+        let id = self.pill_frame.add_tick_callback(move |pill, clock| {
+            let now_us = clock.frame_time();
+            let prev_us = last_us.get();
+            last_us.set(now_us);
+
+            let dt = if prev_us == 0 {
+                1.0 / 60.0
+            } else {
+                ((now_us - prev_us) as f64 / 1_000_000.0).clamp(0.001, 0.033)
+            };
+
+            let cur = current_ref.get();
+            let tgt = target_ref.get();
+            let mut vw = vel_w_ref.get();
+            let mut vh = vel_h_ref.get();
+
+            // Spring constants: stiffness = 260, damping = 28 (smooth, responsive Dynamic Island feel)
+            const STIFFNESS: f64 = 260.0;
+            const DAMPING: f64 = 28.0;
+
+            let force_w = (tgt.width - cur.width) * STIFFNESS - vw * DAMPING;
+            let force_h = (tgt.height - cur.height) * STIFFNESS - vh * DAMPING;
+
+            vw += force_w * dt;
+            vh += force_h * dt;
+
+            let next_w = (cur.width + vw * dt).max(24.0);
+            let next_h = (cur.height + vh * dt).max(12.0);
+
+            vel_w_ref.set(vw);
+            vel_h_ref.set(vh);
+
+            let settled = (tgt.width - next_w).abs() < 0.35
+                && (tgt.height - next_h).abs() < 0.35
+                && vw.abs() < 1.0
+                && vh.abs() < 1.0;
+
+            let final_dims = if settled {
+                vel_w_ref.set(0.0);
+                vel_h_ref.set(0.0);
+                tgt
+            } else {
+                PillDimensions::new(next_w, next_h)
+            };
+
+            current_ref.set(final_dims);
+            pill.set_width_request(final_dims.width.round() as i32);
+            pill.set_height_request(final_dims.height.round() as i32);
+
+            if let Some(win) = window_weak.upgrade() {
+                update_wayland_input_region(&win, final_dims);
+            }
+
+            if settled {
+                *tick_slot.borrow_mut() = None;
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+
+        *self.anim_tick_id.borrow_mut() = Some(id);
+    }
+
     fn apply_accent_glow(&self, rgb: Option<(u8, u8, u8)>) {
         let (r, g, b) = rgb.unwrap_or((137, 180, 250));
         let dynamic_css = format!(
-            ".islet-pill.expanded {{                 border-color: rgba({r}, {g}, {b}, 0.35);                 box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55), 0 0 22px rgba({r}, {g}, {b}, 0.28);              }}              .islet-art {{                 box-shadow: 0 0 14px rgba({r}, {g}, {b}, 0.45);              }}              .islet-seek-bar highlight {{                 background-color: rgb({r}, {g}, {b});              }}"
+            ".islet-pill.expanded {{ border-color: rgba({r}, {g}, {b}, 0.35); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55), 0 0 22px rgba({r}, {g}, {b}, 0.28); }} .islet-art {{ box-shadow: 0 0 14px rgba({r}, {g}, {b}, 0.45); }} .islet-seek-bar highlight {{ background-color: rgb({r}, {g}, {b}); }}"
         );
         self.accent_provider.load_from_string(&dynamic_css);
     }
@@ -599,49 +672,27 @@ fn update_wayland_input_region(window: &gtk4::ApplicationWindow, dims: PillDimen
     let pill_x = (MAX_SURFACE_WIDTH - width) / 2;
     let pill_y = SURFACE_SHADOW_PADDING / 2;
 
-    if let Ok(region) = build_rounded_pill_region(pill_x, pill_y, width, height) {
-        surface.set_input_region(&region);
-        trace!(pill_x, pill_y, width, height, "Updated Wayland capsule input region");
-    }
+    let region = build_rounded_pill_region(pill_x, pill_y, width, height);
+    surface.set_input_region(&region);
+    trace!(pill_x, pill_y, width, height, "Updated Wayland capsule input region");
 }
 
-fn build_rounded_pill_region(
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-) -> Result<Region, cairo::Error> {
-    let mask_w = x + width + 2;
-    let mask_h = y + height + 2;
-    let mask = ImageSurface::create(Format::A8, mask_w, mask_h)?;
-    let cr = Context::new(&mask)?;
+/// Builds an exact rounded-capsule `cairo::Region` from horizontal scanline spans.
+///
+/// Clicks outside the semicircular left and right ends pass straight through to windows below.
+fn build_rounded_pill_region(x: i32, y: i32, width: i32, height: i32) -> Region {
+    let h = height.max(1);
+    let w = width.max(1);
+    let r = f64::from(h) * 0.5;
+    let mut rects = Vec::with_capacity(h as usize);
 
-    let radius = f64::from(height) * 0.5;
-    let fx = f64::from(x);
-    let fy = f64::from(y);
-    let fw = f64::from(width);
-    let fh = f64::from(height);
+    for row in 0..h {
+        let dy = (f64::from(row) + 0.5) - r;
+        let chord_half = (r * r - dy * dy).max(0.0).sqrt();
+        let inset = (r - chord_half).floor().max(0.0) as i32;
+        let span_w = (w - inset * 2).max(1);
+        rects.push(RectangleInt::new(x + inset, y + row, span_w, 1));
+    }
 
-    cr.new_sub_path();
-    cr.arc(
-        fx + fw - radius,
-        fy + radius,
-        radius,
-        -std::f64::consts::FRAC_PI_2,
-        std::f64::consts::FRAC_PI_2,
-    );
-    cr.arc(
-        fx + radius,
-        fy + radius,
-        radius,
-        std::f64::consts::FRAC_PI_2,
-        3.0 * std::f64::consts::FRAC_PI_2,
-    );
-    cr.close_path();
-    cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-    cr.fill()?;
-    drop(cr);
-
-    mask.flush();
-    Ok(Region::create_from_surface(&mask)?)
+    Region::create_rectangles(&rects)
 }

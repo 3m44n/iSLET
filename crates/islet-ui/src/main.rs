@@ -5,7 +5,7 @@ mod visualizer_widget;
 mod window;
 
 use glib::ExitCode;
-use gtk4::prelude::*;
+use adw::prelude::*;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 

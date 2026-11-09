@@ -1,0 +1,14 @@
+[Unit]
+Description=Islet Dynamic Island / Floating Media HUD for Wayland
+Documentation=https://github.com/3m44n/iSLET
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/islet
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

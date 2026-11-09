@@ -34,8 +34,8 @@ pub async fn resolve_art_and_accent(art_url: &str) -> (Option<String>, Option<(u
         return (None, None);
     };
 
-    let path_Clone = path.clone();
-    let accent = tokio::task::spawn_blocking(move || extract_dominant_rgb(&path_Clone))
+    let path_clone = path.clone();
+    let accent = tokio::task::spawn_blocking(move || extract_dominant_rgb(&path_clone))
         .await
         .ok()
         .flatten();

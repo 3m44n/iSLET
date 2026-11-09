@@ -1,0 +1,32 @@
+/* Islet Theme: Dark Glass (Translucent Obsidian) */
+/* Copy to ~/.config/islet/style.css to activate immediately via hot-reload */
+
+@define-color islet_bg rgba(12, 12, 16, 0.88);
+@define-color islet_bg_expanded rgba(16, 16, 22, 0.94);
+@define-color islet_border rgba(255, 255, 255, 0.12);
+@define-color islet_fg #f2f4f8;
+@define-color islet_subtext #9aa0b4;
+@define-color islet_accent #7aa2f7;
+
+.islet-pill {
+    background-color: @islet_bg;
+    border: 1px solid @islet_border;
+}
+
+.islet-pill.expanded {
+    background-color: @islet_bg_expanded;
+}
+
+.islet-label,
+.islet-title,
+.islet-slider-pct {
+    color: @islet_fg;
+}
+
+.islet-artist {
+    color: @islet_subtext;
+}
+
+.islet-slider-bar progress {
+    background-color: @islet_accent;
+}

@@ -1,0 +1,33 @@
+/* Islet Theme: Catppuccin Mocha */
+/* Copy to ~/.config/islet/style.css to activate immediately via hot-reload */
+
+@define-color islet_bg rgba(30, 30, 46, 0.94);
+@define-color islet_bg_expanded rgba(24, 24, 37, 0.97);
+@define-color islet_border rgba(203, 166, 247, 0.25);
+@define-color islet_fg #cdd6f4;
+@define-color islet_subtext #a6adc8;
+@define-color islet_accent #cba6f7;
+
+.islet-pill {
+    background-color: @islet_bg;
+    border: 1px solid @islet_border;
+}
+
+.islet-pill.expanded {
+    background-color: @islet_bg_expanded;
+    border-color: rgba(203, 166, 247, 0.45);
+}
+
+.islet-label,
+.islet-title,
+.islet-slider-pct {
+    color: @islet_fg;
+}
+
+.islet-artist {
+    color: @islet_subtext;
+}
+
+.islet-slider-bar progress {
+    background-color: @islet_accent;
+}

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use zbus::fdo::{DBusProxy, PropertiesProxy};
 use zbus::names::{BusName, InterfaceName};
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::{Optional, OwnedValue, Value};
 use zbus::Connection;
 
 use crate::art::resolve_art_and_accent;
@@ -95,19 +95,18 @@ fn spawn_player_listener(conn: Connection, bus_name: String, sender: EventSender
         let Ok(well_known) = BusName::try_from(bus_name.as_str()) else {
             return;
         };
-        let Ok(props) = PropertiesProxy::builder(&conn)
-            .destination(well_known)
-            .and_then(|b| b.path(MPRIS_PATH))
-            .ok()
-            .flatten()
-            .map(PropertiesProxy::Builder::build)
-        else {
+        let Ok(builder) = PropertiesProxy::builder(&conn).destination(well_known) else {
             return;
         };
-        let Ok(props) = props.await else { return };
+        let Ok(builder) = builder.path(MPRIS_PATH) else {
+            return;
+        };
+        let Ok(props) = builder.build().await else {
+            return;
+        };
 
         if let Ok(iface) = InterfaceName::try_from(PLAYER_IFACE) {
-            if let Ok(all) = props.get_all(iface).await {
+            if let Ok(all) = props.get_all(Optional::from(Some(iface))).await {
                 emit_parsed_properties(&bus_name, &all, &sender).await;
             }
         }
@@ -119,7 +118,7 @@ fn spawn_player_listener(conn: Connection, bus_name: String, sender: EventSender
             if let Ok(args) = signal.args() {
                 if args.interface_name.as_str() == PLAYER_IFACE {
                     if let Ok(iface) = InterfaceName::try_from(PLAYER_IFACE) {
-                        if let Ok(all) = props.get_all(iface).await {
+                        if let Ok(all) = props.get_all(Optional::from(Some(iface))).await {
                             emit_parsed_properties(&bus_name, &all, &sender).await;
                         }
                     }

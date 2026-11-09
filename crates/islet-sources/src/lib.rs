@@ -1,9 +1,10 @@
-//! Event-driven background sources for Islet (MPRIS2, Audio, Backlight, Visualizer, Config/CSS, Multi-Monitor).
+//! Event-driven background sources for Islet (MPRIS2, Audio, Backlight, Visualizer, Config/CSS, Multi-Monitor, IPC).
 
 pub mod art;
 pub mod audio;
 pub mod backlight;
 pub mod config_watcher;
+pub mod ipc_server;
 pub mod monitor_watcher;
 pub mod mpris;
 pub mod visualizer;
@@ -14,13 +15,12 @@ use tokio::sync::{mpsc, watch};
 pub use mpris::MprisCommand;
 pub use visualizer::VisualizerControl;
 
-/// Handles returned to the UI layer for controlling MPRIS players and pausing/resuming the FFT visualizer.
 pub struct SourceHandles {
     pub mpris_tx: mpsc::UnboundedSender<MprisCommand>,
     pub visualizer_tx: watch::Sender<VisualizerControl>,
 }
 
-/// Starts all background hardware/D-Bus/FFT/inotify listeners on a dedicated Tokio runtime thread.
+/// Starts all background hardware/D-Bus/FFT/inotify/IPC listeners on a dedicated Tokio runtime thread.
 #[must_use]
 pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
     let (mpris_tx, mpris_rx) = mpsc::unbounded_channel();
@@ -43,7 +43,8 @@ pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
                 let bright_sender = sender.clone();
                 let viz_sender = sender.clone();
                 let cfg_sender = sender.clone();
-                let mon_sender = sender;
+                let mon_sender = sender.clone();
+                let ipc_sender = sender;
 
                 tokio::join!(
                     mpris::run_mpris_watcher(mpris_sender, mpris_rx),
@@ -52,6 +53,7 @@ pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
                     visualizer::run_visualizer(viz_sender, visualizer_rx),
                     config_watcher::run_config_and_css_watcher(cfg_sender),
                     monitor_watcher::run_focused_monitor_watcher(mon_sender),
+                    ipc_server::run_ipc_server(ipc_sender),
                 );
             });
         })

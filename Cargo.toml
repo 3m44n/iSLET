@@ -12,7 +12,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
-authors = ["Islet Contributors"]
+authors = ["3m44n <notximan@proton.me>"]
+repository = "https://github.com/3m44n/iSLET"
+homepage = "https://github.com/3m44n/iSLET"
 description = "Dynamic Island / Floating Media HUD for wlroots and Smithay Wayland compositors"
 
 [workspace.dependencies]

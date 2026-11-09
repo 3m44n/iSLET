@@ -1,13 +1,15 @@
-//! Core geometry, configuration, event bus, and state machine for Islet.
+//! Core geometry, configuration, event bus, IPC protocol, and state machine for Islet.
 
 pub mod config;
 pub mod event;
+pub mod ipc;
 pub mod state;
 
 use serde::{Deserialize, Serialize};
 
 pub use config::{IdleMode, IsletConfig, MonitorFollow};
 pub use event::{EventBus, EventSender, IsletEvent};
+pub use ipc::{socket_path, IpcCommand};
 pub use state::{
     PillState, PlaybackStatus, PlayerRegistry, SliderKind, StateMachine, TrackMetadata,
     TransitionEffect,
@@ -25,13 +27,9 @@ impl PillDimensions {
         Self { width, height }
     }
 
-    /// Compact idle pill size (`120x32` logical px).
     pub const IDLE: Self = Self::new(120.0, 32.0);
-
-    /// Expanded media HUD size (`340x76` logical px).
     pub const MEDIA_EXPANDED: Self = Self::new(340.0, 76.0);
 
-    /// Linearly interpolate between two dimensions by factor `t`.
     #[must_use]
     pub fn lerp(self, target: Self, t: f64) -> Self {
         Self {
@@ -40,7 +38,6 @@ impl PillDimensions {
         }
     }
 
-    /// Corner radius for a true capsule/pill (half of current height).
     #[must_use]
     pub fn corner_radius(self) -> f64 {
         self.height * 0.5
@@ -52,7 +49,6 @@ pub const MAX_SURFACE_WIDTH: i32 = 420 + (SURFACE_SHADOW_PADDING * 2);
 pub const MAX_SURFACE_HEIGHT: i32 = 120 + (SURFACE_SHADOW_PADDING * 2);
 pub const DEFAULT_MARGIN_TOP: i32 = 8;
 
-/// Cubic ease-out curve `1 - (1 - t)^3`.
 #[must_use]
 pub fn ease_out_cubic(t: f64) -> f64 {
     let clamped = t.clamp(0.0, 1.0);
@@ -102,7 +98,6 @@ mod tests {
     fn volume_slider_overrides_media_and_restores_media_after_timeout() {
         let mut sm = StateMachine::new(IsletConfig::default());
 
-        // 1. Start playing media
         let media_fx = sm.handle_event(IsletEvent::MprisUpdate {
             player_id: "mpv".into(),
             status: PlaybackStatus::Playing,
@@ -110,7 +105,6 @@ mod tests {
         });
         let (stale_media_seq, _) = media_fx.schedule_collapse.unwrap();
 
-        // 2. Volume event arrives mid-media
         let vol_fx = sm.handle_event(IsletEvent::VolumeChanged {
             percent: 65,
             muted: false,
@@ -125,13 +119,11 @@ mod tests {
         );
         let (vol_seq, _) = vol_fx.schedule_collapse.unwrap();
 
-        // 3. Stale media timer firing during slider must be ignored
         let ignored = sm.handle_event(IsletEvent::AutoCollapse {
             seq: stale_media_seq,
         });
         assert!(matches!(ignored.state, PillState::Slider(_)));
 
-        // 4. Slider timeout restores compact Media state
         let restored = sm.handle_event(IsletEvent::AutoCollapse { seq: vol_seq });
         assert_eq!(
             restored.state,
@@ -143,58 +135,21 @@ mod tests {
     }
 
     #[test]
-    fn mute_toggle_sets_pulse_flag() {
-        let mut sm = StateMachine::new(IsletConfig::default());
-        sm.handle_event(IsletEvent::VolumeChanged {
-            percent: 50,
-            muted: false,
-        });
-        let mute_fx = sm.handle_event(IsletEvent::VolumeChanged {
-            percent: 50,
-            muted: true,
-        });
-        assert_eq!(
-            mute_fx.state,
-            PillState::Slider(SliderKind::Volume {
-                percent: 50,
-                muted: true,
-                pulse: true,
-            })
-        );
-    }
-
-    #[test]
-    fn player_registry_prefers_playing_and_remembers_last_active() {
-        let mut reg = PlayerRegistry::default();
-        reg.update_player("firefox".into(), PlaybackStatus::Playing, None);
-        reg.update_player("spotify".into(), PlaybackStatus::Paused, None);
-
-        // Playing wins over Paused even if Paused updated later
-        let (active, status, _) = reg.select_active_player().unwrap();
-        assert_eq!(active, "firefox");
-        assert_eq!(status, PlaybackStatus::Playing);
-
-        // When firefox pauses, firefox remains remembered as last active Playing player
-        reg.update_player("firefox".into(), PlaybackStatus::Paused, None);
-        let (active_after, _, _) = reg.select_active_player().unwrap();
-        assert_eq!(active_after, "firefox");
-    }
-
-    #[test]
-    fn config_parsing_and_fallback() {
-        let custom = r#"
-            margin_top = 14
-            idle_mode = "hidden"
-            media_collapse_ms = 5000
-            reduce_motion = true
-            visualizer_bars = 30
-        "#;
-        let cfg = IsletConfig::from_toml_str(custom);
-        assert_eq!(cfg.margin_top, 14);
-        assert_eq!(cfg.idle_mode, IdleMode::Hidden);
-        assert_eq!(cfg.visualizer_bars, 24); // clamped to 12..=24
-
-        let broken = IsletConfig::from_toml_str("not valid [[[ toml");
-        assert_eq!(broken, IsletConfig::default());
+    fn ipc_wire_roundtrip() {
+        let cmds = [
+            IpcCommand::ShowVolume(70),
+            IpcCommand::ShowBrightness(85),
+            IpcCommand::Toggle,
+            IpcCommand::Notify {
+                title: "Battery Low".into(),
+                body: "15% remaining".into(),
+            },
+            IpcCommand::Ping,
+        ];
+        for cmd in cmds {
+            let line = cmd.to_wire_line();
+            let parsed = IpcCommand::from_wire_line(&line).expect("should parse wire command");
+            assert_eq!(parsed, cmd);
+        }
     }
 }

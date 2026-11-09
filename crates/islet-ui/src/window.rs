@@ -155,8 +155,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     });
 }
 
-/// Binds the `gtk4-layer-shell` surface to a target monitor by connector name (e.g. `"DP-1"`),
-/// or the primary/first monitor when `target_connector` is `None`.
 fn bind_window_to_connector(window: &gtk4::ApplicationWindow, target_connector: Option<&str>) {
     let Some(display) = gdk4::Display::default() else {
         return;
@@ -172,13 +170,13 @@ fn bind_window_to_connector(window: &gtk4::ApplicationWindow, target_connector: 
         match target_connector {
             Some(wanted) => {
                 if monitor.connector().as_deref() == Some(wanted) {
-                    window.set_monitor(Some(&monitor));
+                    window.set_monitor(&monitor);
                     info!(connector = wanted, "Moved Islet overlay to target monitor");
                     return;
                 }
             }
             None => {
-                window.set_monitor(Some(&monitor));
+                window.set_monitor(&monitor);
                 return;
             }
         }
