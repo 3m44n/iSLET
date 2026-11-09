@@ -1,20 +1,22 @@
-//! Wayland `wlr-layer-shell` window setup and periodic demo timer for Milestone 1.
+//! Wayland `wlr-layer-shell` window setup driven by the `islet-core` EventBus and StateMachine.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use islet_core::{
-    PillDimensions, DEFAULT_MARGIN_TOP, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH,
+    EventBus, IsletConfig, IsletEvent, PlaybackStatus, StateMachine, TrackMetadata,
+    DEFAULT_MARGIN_TOP, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH,
 };
 use tracing::{debug, info};
 
 use crate::pill::PillSurface;
 
-/// Constructs the top-center `Overlay` layer-shell window and attaches the animated `PillSurface`.
+/// Constructs the top-center `Overlay` layer-shell window and attaches the event-driven `PillSurface`.
 pub fn build_overlay_window(app: &adw::Application) {
+    let config = IsletConfig::default();
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
         .title("Islet")
@@ -25,51 +27,79 @@ pub fn build_overlay_window(app: &adw::Application) {
         .css_classes(["islet-window"])
         .build();
 
-    // 1. Initialize wlr-layer-shell before the surface is realized.
     window.init_layer_shell();
     window.set_namespace("islet");
     window.set_layer(Layer::Overlay);
 
-    // 2. Anchor exclusively to Top so the compositor centers horizontally.
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Bottom, false);
     window.set_anchor(Edge::Left, false);
     window.set_anchor(Edge::Right, false);
-    window.set_margin(Edge::Top, DEFAULT_MARGIN_TOP);
+    window.set_margin(Edge::Top, config.margin_top.max(DEFAULT_MARGIN_TOP));
 
-    // 3. Never steal keyboard focus and never push tiled windows (`exclusive_zone = 0`).
     window.set_keyboard_mode(KeyboardMode::None);
     window.set_exclusive_zone(0);
 
-    // 4. Build the animated pill surface widget and mount it inside the fixed overlay envelope.
-    let pill = Rc::new(PillSurface::new(&window));
+    let EventBus {
+        sender,
+        mut receiver,
+    } = EventBus::new();
+
+    let pill = Rc::new(PillSurface::new(&window, sender.clone()));
     window.set_child(Some(pill.root_widget()));
-
     window.present();
-    info!(
-        "Layer-shell window initialized: layer=Overlay, anchor=Top, exclusive_zone=0, margin_top={DEFAULT_MARGIN_TOP}"
-    );
 
-    // 5. Milestone 1 verification timer: toggle between Idle (120x32) and Media (340x76) every 3s.
-    let expanded = Rc::new(Cell::new(false));
-    let pill_timer = Rc::clone(&pill);
-    glib::timeout_add_local(Duration::from_secs(3), move || {
-        let next_expanded = !expanded.get();
-        expanded.set(next_expanded);
+    info!("Islet layer-shell window and EventBus online");
 
-        let target = if next_expanded {
-            PillDimensions::MEDIA_EXPANDED
-        } else {
-            PillDimensions::IDLE
-        };
+    // Spawn the main-context event consumer that drives the StateMachine.
+    let state_machine = Rc::new(RefCell::new(StateMachine::new(config)));
+    let pill_for_loop = Rc::clone(&pill);
+    let sender_for_timers = sender.clone();
 
-        debug!(
-            expanded = next_expanded,
-            target_width = target.width,
-            target_height = target.height,
-            "Retargeting Milestone 1 pill morph animation"
-        );
-        pill_timer.morph_to(target, next_expanded);
+    glib::spawn_future_local(async move {
+        while let Some(event) = receiver.recv().await {
+            debug!(?event, "Processing IsletEvent");
+            let effect = state_machine.borrow_mut().handle_event(event);
+            pill_for_loop.apply_transition(&effect);
+
+            if let Some((seq, timeout_ms)) = effect.schedule_collapse {
+                let tx = sender_for_timers.clone();
+                glib::timeout_add_local_once(Duration::from_millis(timeout_ms), move || {
+                    tx.send(IsletEvent::AutoCollapse { seq });
+                });
+            }
+        }
+    });
+
+    // Milestone 2 demo sequence: cycle through Media -> Volume override -> Restore Media -> Collapse
+    let demo_tx = sender;
+    let step = Rc::new( std::cell::Cell::new(0_u8));
+    glib::timeout_add_local(Duration::from_millis(2500), move || {
+        let current_step = step.get();
+        step.set((current_step + 1) % 3);
+
+        match current_step {
+            0 => {
+                demo_tx.send(IsletEvent::MprisUpdate {
+                    player_id: "spotify".into(),
+                    status: PlaybackStatus::Playing,
+                    metadata: Some(TrackMetadata {
+                        title: "Midnight City".into(),
+                        artist: "M83".into(),
+                        ..Default::default()
+                    }),
+                });
+            }
+            1 => {
+                demo_tx.send(IsletEvent::VolumeChanged {
+                    percent: 72,
+                    muted: false,
+                });
+            }
+            _ => {
+                demo_tx.send(IsletEvent::BrightnessChanged { percent: 85 });
+            }
+        }
         glib::ControlFlow::Continue
     });
 }

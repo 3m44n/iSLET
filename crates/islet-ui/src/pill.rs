@@ -6,7 +6,10 @@ use std::rc::Rc;
 use adw::prelude::*;
 use cairo::{Context, Format, ImageSurface, Region};
 use gtk4::prelude::*;
-use islet_core::{PillDimensions, MAX_SURFACE_WIDTH, SURFACE_SHADOW_PADDING};
+use islet_core::{
+    EventSender, IsletEvent, PillDimensions, PillState, SliderKind, TransitionEffect,
+    MAX_SURFACE_WIDTH, SURFACE_SHADOW_PADDING,
+};
 use tracing::trace;
 
 /// Manages the visual pill widget, spring/timed size morphs, and Cairo input-region mask.
@@ -22,14 +25,12 @@ pub struct PillSurface {
 
 impl PillSurface {
     #[must_use]
-    pub fn new(window: &gtk4::ApplicationWindow) -> Self {
+    pub fn new(window: &gtk4::ApplicationWindow, sender: EventSender) -> Self {
         let initial = PillDimensions::IDLE;
         let current_dims = Rc::new(Cell::new(initial));
         let start_dims = Rc::new(Cell::new(initial));
         let target_dims = Rc::new(Cell::new(initial));
 
-        // Outer fixed container reserves static surface bounds so shadow/glow never clip
-        // and Wayland surface size doesn't thrash on every animation tick.
         let outer_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .halign(gtk4::Align::Center)
@@ -37,7 +38,6 @@ impl PillSurface {
             .margin_top(SURFACE_SHADOW_PADDING / 2)
             .build();
 
-        // The actual rounded pill box whose width/height animate smoothly.
         let pill_frame = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .halign(gtk4::Align::Center)
@@ -58,14 +58,25 @@ impl PillSurface {
         pill_frame.append(&status_label);
         outer_box.append(&pill_frame);
 
-        // Click controller inside the pill bounds to verify click reception vs outside pass-through.
+        // Left-click and hover controllers wired directly to EventBus.
+        let click_tx = sender.clone();
         let click_gesture = gtk4::GestureClick::new();
-        click_gesture.connect_released(|_, _, x, y| {
-            tracing::info!(x, y, "Pill clicked inside active input region!");
+        click_gesture.connect_released(move |_, _, _, _| {
+            click_tx.send(IsletEvent::PillClicked);
         });
         pill_frame.add_controller(click_gesture);
 
-        // Configure interruptible SpringAnimation driven by the GTK4 frame clock.
+        let hover_enter_tx = sender.clone();
+        let hover_leave_tx = sender;
+        let motion_ctrl = gtk4::EventControllerMotion::new();
+        motion_ctrl.connect_enter(move |_, _, _| {
+            hover_enter_tx.send(IsletEvent::HoverChanged(true));
+        });
+        motion_ctrl.connect_leave(move |_| {
+            hover_leave_tx.send(IsletEvent::HoverChanged(false));
+        });
+        pill_frame.add_controller(motion_ctrl);
+
         let dims_for_cb = Rc::clone(&current_dims);
         let start_for_cb = Rc::clone(&start_dims);
         let target_for_cb = Rc::clone(&target_dims);
@@ -84,18 +95,16 @@ impl PillSurface {
             }
         });
 
-        // Critically damped spring (~320ms settling time) for fluid Dynamic Island feel.
         let spring_params = adw::SpringParams::new(0.88, 1.0, 260.0);
-        let spring_anim = adw::SpringAnimation::new(&pill_frame, 0.0, 1.0, spring_params, anim_target);
+        let spring_anim =
+            adw::SpringAnimation::new(&pill_frame, 0.0, 1.0, spring_params, anim_target);
         spring_anim.set_clamp(false);
 
-        // Apply the initial click-through input region as soon as the GDK surface maps.
         let dims_on_map = Rc::clone(&current_dims);
         window.connect_map(move |win| {
             update_wayland_input_region(win, dims_on_map.get());
         });
 
-        // Re-apply input region when fractional scale factor changes across monitors.
         let dims_on_scale = Rc::clone(&current_dims);
         window.connect_scale_factor_notify(move |win| {
             update_wayland_input_region(win, dims_on_scale.get());
@@ -117,31 +126,61 @@ impl PillSurface {
         &self.outer_box
     }
 
-    /// Smoothly morphs the pill to `target`, retargeting seamlessly if called mid-flight.
-    pub fn morph_to(&self, target: PillDimensions, expanded: bool) {
-        // Capture current instantaneous dimensions so mid-animation retargeting never snaps.
+    /// Applies a `TransitionEffect` from the state machine, smoothly retargeting mid-flight animations.
+    pub fn apply_transition(&self, effect: &TransitionEffect) {
         self.start_dims.set(self.current_dims.get());
-        self.target_dims.set(target);
+        self.target_dims.set(effect.dimensions);
 
-        if expanded {
-            self.pill_frame.add_css_class("expanded");
-            self.status_label.set_label("Islet • Media Expanded (340×76)");
-        } else {
-            self.pill_frame.remove_css_class("expanded");
-            self.status_label.set_label("Islet • Idle");
+        match &effect.state {
+            PillState::Hidden => {
+                self.pill_frame.remove_css_class("expanded");
+                self.status_label.set_label("");
+            }
+            PillState::Idle => {
+                self.pill_frame.remove_css_class("expanded");
+                self.status_label.set_label("Islet • Idle");
+            }
+            PillState::Media {
+                expanded,
+                controls_visible,
+            } => {
+                if *expanded || *controls_visible {
+                    self.pill_frame.add_css_class("expanded");
+                } else {
+                    self.pill_frame.remove_css_class("expanded");
+                }
+                let text = if *controls_visible {
+                    "⏮  ⏯  ⏭   Media Controls"
+                } else if *expanded {
+                    "🎵 Media Expanded"
+                } else {
+                    "🎵 Playing"
+                };
+                self.status_label.set_label(text);
+            }
+            PillState::Slider(SliderKind::Volume { percent, muted, .. }) => {
+                self.pill_frame.add_css_class("expanded");
+                let icon = if *muted { "🔇" } else { "🔊" };
+                self.status_label
+                    .set_label(&format!("{icon} Volume {percent}%"));
+            }
+            PillState::Slider(SliderKind::Brightness { percent }) => {
+                self.pill_frame.add_css_class("expanded");
+                self.status_label
+                    .set_label(&format!("☀️ Brightness {percent}%"));
+            }
+            PillState::Notification { title, body } => {
+                self.pill_frame.add_css_class("expanded");
+                self.status_label.set_label(&format!("{title}: {body}"));
+            }
         }
 
-        // Preserve velocity if interrupted mid-flight.
         let current_velocity = self.spring_anim.velocity();
         self.spring_anim.set_initial_velocity(current_velocity);
         self.spring_anim.play();
     }
 }
 
-/// Restricts the Wayland surface input region strictly to the rounded pill capsule.
-///
-/// Any pointer click or scroll event outside the rasterized capsule mask passes straight
-/// through to underlying windows on the desktop.
 fn update_wayland_input_region(window: &gtk4::ApplicationWindow, dims: PillDimensions) {
     let Some(surface) = window.surface() else {
         return;
@@ -158,10 +197,6 @@ fn update_wayland_input_region(window: &gtk4::ApplicationWindow, dims: PillDimen
     }
 }
 
-/// Rasterizes a true rounded capsule on an `A8` alpha mask surface and converts it into a `cairo::Region`.
-///
-/// Using `ImageSurface::create(Format::A8, ...)` + `Region::create_from_surface` guarantees that
-/// even the corner quadrants outside the circular pill ends are click-through.
 fn build_rounded_pill_region(
     x: i32,
     y: i32,
@@ -179,7 +214,6 @@ fn build_rounded_pill_region(
     let fw = f64::from(width);
     let fh = f64::from(height);
 
-    // Draw capsule path with semicircular left and right caps.
     cr.new_sub_path();
     cr.arc(
         fx + fw - radius,
