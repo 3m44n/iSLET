@@ -57,6 +57,12 @@ fn parse_cli_args(args: &[String]) -> Option<IpcCommand> {
             match kind {
                 "volume" | "vol" => Some(IpcCommand::ShowVolume(val.min(150))),
                 "brightness" | "bri" => Some(IpcCommand::ShowBrightness(val.min(100))),
+                "battery" | "bat" => {
+                    let charging = args.get(3).is_some_and(|s| {
+                        s.eq_ignore_ascii_case("charging") || s == "1" || s.eq_ignore_ascii_case("true")
+                    });
+                    Some(IpcCommand::ShowBattery { percent: val.min(100), charging })
+                }
                 _ => None,
             }
         }
@@ -74,6 +80,7 @@ fn print_usage() {
         "Usage:
            islet-ctl show volume <0..150>
            islet-ctl show brightness <0..100>
+           islet-ctl show battery <0..100> [charging]
            islet-ctl toggle
            islet-ctl notify <Title> [Body]
            islet-ctl ping"

@@ -20,11 +20,13 @@
 
 .islet-label,
 .islet-title,
+.islet-notif-title,
 .islet-slider-pct {
     color: @islet_fg;
 }
 
-.islet-artist {
+.islet-artist,
+.islet-notif-body {
     color: @islet_subtext;
 }
 

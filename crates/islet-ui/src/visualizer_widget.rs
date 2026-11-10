@@ -58,7 +58,7 @@ impl SpectrumWidget {
                 let y = (h - bar_h) * 0.5;
                 let radius = (bar_w * 0.5).min(bar_h * 0.5);
 
-                // Draw vertical rounded capsule bar
+                // Draw vertical rounded capsule bar with luminous accent gradient
                 cr.new_sub_path();
                 cr.arc(
                     x + radius,
@@ -76,7 +76,13 @@ impl SpectrumWidget {
                 );
                 cr.close_path();
 
-                cr.set_source_rgba(r, g, b, 0.35 + 0.65 * normalized);
+                let grad = cairo::LinearGradient::new(x, y, x, y + bar_h);
+                let top_r = (r * 1.22_f64).min(1.0_f64);
+                let top_g = (g * 1.22_f64).min(1.0_f64);
+                let top_b = (b * 1.22_f64).min(1.0_f64);
+                grad.add_color_stop_rgba(0.0, top_r, top_g, top_b, 0.95);
+                grad.add_color_stop_rgba(1.0, r * 0.75, g * 0.75, b * 0.75, 0.40 + 0.50 * normalized);
+                let _ = cr.set_source(&grad);
                 let _ = cr.fill();
             }
         });

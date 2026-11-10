@@ -27,6 +27,11 @@ pub enum IsletEvent {
     BrightnessChanged {
         percent: u8,
     },
+    /// Battery capacity (0..=100%) and charging status changed.
+    BatteryChanged {
+        percent: u8,
+        charging: bool,
+    },
     /// New FFT spectrum bars (normalized 0.0..=1.0).
     SpectrumFrame(Vec<f32>),
     /// Transient notification from IPC (`islet-ctl notify "Title" "Body"`).

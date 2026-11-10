@@ -40,6 +40,10 @@ pub enum SliderKind {
     Brightness {
         percent: u8,
     },
+    Battery {
+        percent: u8,
+        charging: bool,
+    },
 }
 
 /// Visual states of the Islet pill.
@@ -78,7 +82,7 @@ impl PillState {
                 ..
             } => PillDimensions::new(372.0, 108.0),
             Self::Slider(_) => PillDimensions::new(260.0, 44.0),
-            Self::Notification { .. } => PillDimensions::new(340.0, 72.0),
+            Self::Notification { .. } => PillDimensions::new(360.0, 60.0),
         }
     }
 }
@@ -274,6 +278,16 @@ impl StateMachine {
                 self.save_restorable_if_not_transient();
                 self.state = PillState::Slider(SliderKind::Brightness {
                     percent: percent.min(100),
+                });
+                let seq = self.bump_seq();
+                self.effect(Some((seq, self.config.slider_timeout_ms)))
+            }
+
+            IsletEvent::BatteryChanged { percent, charging } => {
+                self.save_restorable_if_not_transient();
+                self.state = PillState::Slider(SliderKind::Battery {
+                    percent: percent.min(100),
+                    charging,
                 });
                 let seq = self.bump_seq();
                 self.effect(Some((seq, self.config.slider_timeout_ms)))

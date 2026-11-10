@@ -123,6 +123,7 @@ async fn run_live_fft_capture(
 
     let mut byte_buf = vec![0_u8; FFT_SIZE * 4];
     let mut pcm_samples = vec![0.0_f32; FFT_SIZE];
+    let mut fft_buffer = vec![Complex::new(0.0_f32, 0.0_f32); FFT_SIZE];
     let mut phase = 0.0_f32;
 
     loop {
@@ -144,7 +145,7 @@ async fn run_live_fft_capture(
                         for (i, chunk) in byte_buf.chunks_exact(4).enumerate() {
                             pcm_samples[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         }
-                        let mut spectrum = compute_fft_bars(&pcm_samples, fft.as_ref(), bar_count);
+                        let mut spectrum = compute_fft_bars_into(&pcm_samples, fft.as_ref(), bar_count, &mut fft_buffer);
                         // If monitor stream is completely silent (e.g. sandboxed player), blend subtle procedural motion.
                         if spectrum.iter().all(|&v| v < 0.02) {
                             phase += 0.14;
@@ -190,12 +191,35 @@ async fn run_procedural_fallback(
     }
 }
 
-/// Applies a Hann window to `samples`, executes `rustfft`, and downsamples magnitudes into `bar_count` log-spaced bars (`0.0..=1.0`).
+fn get_hann_window() -> &'static [f32; FFT_SIZE] {
+    use std::sync::OnceLock;
+    static HANN: OnceLock<[f32; FFT_SIZE]> = OnceLock::new();
+    HANN.get_or_init(|| {
+        let mut table = [0.0_f32; FFT_SIZE];
+        for (i, val) in table.iter_mut().enumerate() {
+            *val = 0.5 * (1.0 - (2.0 * PI * (i as f32) / ((FFT_SIZE - 1) as f32)).cos());
+        }
+        table
+    })
+}
+
+/// Applies a precomputed Hann window to `samples`, executes `rustfft`, and downsamples magnitudes into `bar_count` log-spaced bars (`0.0..=1.0`).
 #[must_use]
 pub fn compute_fft_bars(
     samples: &[f32],
     fft: &dyn rustfft::Fft<f32>,
     bar_count: usize,
+) -> Vec<f32> {
+    let mut buffer = vec![Complex::new(0.0_f32, 0.0_f32); FFT_SIZE];
+    compute_fft_bars_into(samples, fft, bar_count, &mut buffer)
+}
+
+/// Zero-allocation variant reusing a caller-provided scratch buffer.
+pub fn compute_fft_bars_into(
+    samples: &[f32],
+    fft: &dyn rustfft::Fft<f32>,
+    bar_count: usize,
+    buffer: &mut [Complex<f32>],
 ) -> Vec<f32> {
     let n = samples.len().min(FFT_SIZE);
     let bars = bar_count.clamp(12, 24);
@@ -203,15 +227,13 @@ pub fn compute_fft_bars(
         return vec![0.0; bars];
     }
 
-    let mut buffer: Vec<Complex<f32>> = (0..FFT_SIZE)
-        .map(|i| {
-            let sample = samples.get(i).copied().unwrap_or(0.0);
-            let hann = 0.5 * (1.0 - (2.0 * PI * (i as f32) / ((FFT_SIZE - 1) as f32)).cos());
-            Complex::new(sample * hann, 0.0)
-        })
-        .collect();
+    let hann = get_hann_window();
+    for i in 0..FFT_SIZE {
+        let sample = samples.get(i).copied().unwrap_or(0.0);
+        buffer[i] = Complex::new(sample * hann[i], 0.0);
+    }
 
-    fft.process(&mut buffer);
+    fft.process(buffer);
 
     // Use the positive frequency half-spectrum (`1 .. FFT_SIZE / 2`).
     let usable_bins = (FFT_SIZE / 2) - 1;
@@ -238,7 +260,7 @@ pub fn compute_fft_bars(
             }
         }
 
-        // Convert to perceptual dB-like curve clamped to `0.0..=1.0`.
+        // Convert to perceptual curve clamped to `0.0..=1.0`.
         let perceptual = peak.sqrt().clamp(0.0, 1.0);
         output.push(perceptual);
     }

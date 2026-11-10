@@ -9,6 +9,7 @@ use crate::event::IsletEvent;
 pub enum IpcCommand {
     ShowVolume(u8),
     ShowBrightness(u8),
+    ShowBattery { percent: u8, charging: bool },
     Toggle,
     Notify { title: String, body: String },
     Ping,
@@ -21,6 +22,9 @@ impl IpcCommand {
         match self {
             Self::ShowVolume(v) => format!("SHOW_VOLUME {v}\n"),
             Self::ShowBrightness(b) => format!("SHOW_BRIGHTNESS {b}\n"),
+            Self::ShowBattery { percent, charging } => {
+                format!("SHOW_BATTERY {percent} {}\n", if *charging { 1 } else { 0 })
+            }
             Self::Toggle => "TOGGLE\n".to_owned(),
             Self::Notify { title, body } => {
                 let clean_t = title.replace(['\n', '\r', '\t'], " ");
@@ -49,6 +53,12 @@ impl IpcCommand {
             let val = rest.trim().parse::<u8>().ok()?.min(100);
             return Some(Self::ShowBrightness(val));
         }
+        if let Some(rest) = trimmed.strip_prefix("SHOW_BATTERY ") {
+            let mut parts = rest.split_whitespace();
+            let pct = parts.next()?.parse::<u8>().ok()?.min(100);
+            let charging = parts.next().is_some_and(|s| s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("charging"));
+            return Some(Self::ShowBattery { percent: pct, charging });
+        }
         if let Some(rest) = trimmed.strip_prefix("NOTIFY ") {
             let (title, body) = rest.split_once('\t').unwrap_or((rest, ""));
             return Some(Self::Notify {
@@ -68,6 +78,9 @@ impl IpcCommand {
                 muted: percent == 0,
             }),
             Self::ShowBrightness(percent) => Some(IsletEvent::BrightnessChanged { percent }),
+            Self::ShowBattery { percent, charging } => {
+                Some(IsletEvent::BatteryChanged { percent, charging })
+            }
             Self::Toggle => Some(IsletEvent::ToggleVisibility),
             Self::Notify { title, body } => Some(IsletEvent::Notify { title, body }),
             Self::Ping => None,

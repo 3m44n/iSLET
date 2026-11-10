@@ -3,6 +3,7 @@
 pub mod art;
 pub mod audio;
 pub mod backlight;
+pub mod battery;
 pub mod config_watcher;
 pub mod ipc_server;
 pub mod monitor_watcher;
@@ -41,6 +42,7 @@ pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
                 let mpris_sender = sender.clone();
                 let audio_sender = sender.clone();
                 let bright_sender = sender.clone();
+                let bat_sender = sender.clone();
                 let viz_sender = sender.clone();
                 let cfg_sender = sender.clone();
                 let mon_sender = sender.clone();
@@ -50,6 +52,7 @@ pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
                     mpris::run_mpris_watcher(mpris_sender, mpris_rx),
                     audio::run_audio_watcher(audio_sender),
                     backlight::run_backlight_watcher(bright_sender),
+                    battery::run_battery_watcher(bat_sender),
                     visualizer::run_visualizer(viz_sender, visualizer_rx),
                     config_watcher::run_config_and_css_watcher(cfg_sender),
                     monitor_watcher::run_focused_monitor_watcher(mon_sender),

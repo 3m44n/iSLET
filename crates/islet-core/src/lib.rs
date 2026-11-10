@@ -139,6 +139,7 @@ mod tests {
         let cmds = [
             IpcCommand::ShowVolume(70),
             IpcCommand::ShowBrightness(85),
+            IpcCommand::ShowBattery { percent: 80, charging: true },
             IpcCommand::Toggle,
             IpcCommand::Notify {
                 title: "Battery Low".into(),

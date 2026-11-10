@@ -41,6 +41,8 @@ pub struct PillSurface {
     slider_icon: gtk4::Label,
     slider_bar: gtk4::ProgressBar,
     slider_pct_label: gtk4::Label,
+    notif_title_label: gtk4::Label,
+    notif_body_label: gtk4::Label,
     current_dims: Rc<Cell<PillDimensions>>,
     target_dims: Rc<Cell<PillDimensions>>,
     vel_w: Rc<Cell<f64>>,
@@ -265,6 +267,55 @@ impl PillSurface {
         slider_row.append(&slider_pct_label);
         view_stack.add_named(&slider_row, Some("slider"));
 
+        // --- 4. Notification View ---
+        let notif_row = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .valign(gtk4::Align::Center)
+            .spacing(12)
+            .build();
+
+        let notif_icon = gtk4::Label::builder()
+            .label("🔔")
+            .css_classes(["islet-notif-badge"])
+            .build();
+
+        let notif_text_col = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .valign(gtk4::Align::Center)
+            .hexpand(true)
+            .spacing(1)
+            .build();
+
+        let notif_title_label = gtk4::Label::builder()
+            .label("")
+            .halign(gtk4::Align::Start)
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .single_line_mode(true)
+            .css_classes(["islet-notif-title"])
+            .build();
+
+        let notif_body_label = gtk4::Label::builder()
+            .label("")
+            .halign(gtk4::Align::Start)
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .single_line_mode(true)
+            .css_classes(["islet-notif-body"])
+            .build();
+
+        notif_text_col.append(&notif_title_label);
+        notif_text_col.append(&notif_body_label);
+
+        notif_row.append(&notif_icon);
+        notif_row.append(&notif_text_col);
+        view_stack.add_named(&notif_row, Some("notification"));
+
+        // Background idle clock periodic updater (every 30s)
+        let idle_lbl_tick = idle_label.clone();
+        glib::timeout_add_seconds_local(30, move || {
+            idle_lbl_tick.set_label(&format!("●  {}", current_hh_mm()));
+            glib::ControlFlow::Continue
+        });
+
         pill_frame.append(&view_stack);
         outer_box.append(&pill_frame);
 
@@ -332,6 +383,8 @@ impl PillSurface {
             slider_icon,
             slider_bar,
             slider_pct_label,
+            notif_title_label,
+            notif_body_label,
             current_dims,
             target_dims,
             vel_w,
@@ -480,12 +533,35 @@ impl PillSurface {
                 self.slider_pct_label.set_label(&format!("{percent}%"));
                 self.view_stack.set_visible_child_name("slider");
             }
+            PillState::Slider(SliderKind::Battery { percent, charging }) => {
+                self.stop_marquee();
+                self.pill_frame.set_opacity(1.0);
+                self.pill_frame.add_css_class("expanded");
+                let icon = if *charging {
+                    "⚡"
+                } else if *percent <= 20 {
+                    "🪫"
+                } else {
+                    "🔋"
+                };
+                self.slider_icon.set_label(icon);
+                self.slider_bar
+                    .set_fraction((f64::from(*percent) / 100.0).clamp(0.0, 1.0));
+                let label_text = if *charging {
+                    format!("{percent}% ⚡")
+                } else {
+                    format!("{percent}%")
+                };
+                self.slider_pct_label.set_label(&label_text);
+                self.view_stack.set_visible_child_name("slider");
+            }
             PillState::Notification { title, body } => {
                 self.stop_marquee();
                 self.pill_frame.set_opacity(1.0);
                 self.pill_frame.add_css_class("expanded");
-                self.idle_label.set_label(&format!("🔔 {title} — {body}"));
-                self.view_stack.set_visible_child_name("idle");
+                self.notif_title_label.set_label(title);
+                self.notif_body_label.set_label(body);
+                self.view_stack.set_visible_child_name("notification");
             }
         }
 
@@ -538,9 +614,9 @@ impl PillSurface {
             let mut vw = vel_w_ref.get();
             let mut vh = vel_h_ref.get();
 
-            // Spring constants: stiffness = 260, damping = 28 (smooth, responsive Dynamic Island feel)
-            const STIFFNESS: f64 = 260.0;
-            const DAMPING: f64 = 28.0;
+            // Spring constants: stiffness = 320, damping = 24 (fluid, responsive Dynamic Island snap)
+            const STIFFNESS: f64 = 320.0;
+            const DAMPING: f64 = 24.0;
 
             let force_w = (tgt.width - cur.width) * STIFFNESS - vw * DAMPING;
             let force_h = (tgt.height - cur.height) * STIFFNESS - vh * DAMPING;
@@ -653,6 +729,11 @@ impl PillSurface {
 }
 
 fn current_hh_mm() -> String {
+    if let Ok(dt) = glib::DateTime::now_local() {
+        if let Ok(formatted) = dt.format("%H:%M") {
+            return formatted.to_string();
+        }
+    }
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
