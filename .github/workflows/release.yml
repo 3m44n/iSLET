@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Package (x86_64 Linux)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            meson \
+            ninja-build \
+            libwayland-dev \
+            wayland-protocols \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libpipewire-0.3-dev \
+            libclang-dev \
+            libgirepository1.0-dev \
+            gobject-introspection
+
+      - name: Build and install gtk4-layer-shell
+        run: |
+          git clone --depth 1 https://github.com/wmww/gtk4-layer-shell.git
+          meson setup gtk4-layer-shell/build gtk4-layer-shell \
+            --prefix=/usr \
+            -Dintrospection=false \
+            -Dvapi=false \
+            -Dexamples=false \
+            -Dtests=false \
+            -Ddocs=false
+          sudo ninja -C gtk4-layer-shell/build install
+          sudo ldconfig
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --workspace
+
+      - name: Determine version tag
+        id: vars
+        run: |
+          TAG="${GITHUB_REF_NAME:-v0.1.0}"
+          CLEAN_VER="${TAG#v}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+
+      - name: Package tarball
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          ARCHIVE_DIR="islet-${TAG}-x86_64-linux"
+          mkdir -p "${ARCHIVE_DIR}/themes"
+
+          cp target/release/islet "${ARCHIVE_DIR}/"
+          cp target/release/islet-ctl "${ARCHIVE_DIR}/"
+          cp packaging/dev.islet.Overlay.desktop "${ARCHIVE_DIR}/"
+          cp packaging/islet.service "${ARCHIVE_DIR}/"
+          cp assets/style.css "${ARCHIVE_DIR}/"
+          cp assets/theme-*.css "${ARCHIVE_DIR}/themes/"
+
+          # Bundle gtk4-layer-shell library for convenience
+          mkdir -p "${ARCHIVE_DIR}/lib"
+          cp -a /usr/lib/libgtk4-layer-shell.so* "${ARCHIVE_DIR}/lib/" 2>/dev/null || true
+
+          tar -czf "${ARCHIVE_DIR}.tar.gz" -C "${ARCHIVE_DIR}" .
+          sha256sum "${ARCHIVE_DIR}.tar.gz" > "${ARCHIVE_DIR}.tar.gz.sha256"
+
+      - name: Build .deb package
+        run: |
+          VERSION="${{ steps.vars.outputs.version }}"
+          PKG="islet_${VERSION}_amd64"
+
+          mkdir -p "${PKG}/DEBIAN"
+          mkdir -p "${PKG}/usr/bin"
+          mkdir -p "${PKG}/usr/lib"
+          mkdir -p "${PKG}/usr/share/applications"
+          mkdir -p "${PKG}/usr/share/islet/themes"
+          mkdir -p "${PKG}/usr/lib/systemd/user"
+
+          cp target/release/islet "${PKG}/usr/bin/"
+          cp target/release/islet-ctl "${PKG}/usr/bin/"
+          cp -a /usr/lib/libgtk4-layer-shell.so* "${PKG}/usr/lib/" 2>/dev/null || true
+          cp packaging/dev.islet.Overlay.desktop "${PKG}/usr/share/applications/"
+          cp packaging/islet.service "${PKG}/usr/lib/systemd/user/"
+          cp assets/style.css "${PKG}/usr/share/islet/"
+          cp assets/theme-*.css "${PKG}/usr/share/islet/themes/"
+
+          printf "Package: islet\n" > "${PKG}/DEBIAN/control"
+          printf "Version: %s\n" "${VERSION}" >> "${PKG}/DEBIAN/control"
+          printf "Section: utils\n" >> "${PKG}/DEBIAN/control"
+          printf "Priority: optional\n" >> "${PKG}/DEBIAN/control"
+          printf "Architecture: amd64\n" >> "${PKG}/DEBIAN/control"
+          printf "Maintainer: 3m44n <notximan@proton.me>\n" >> "${PKG}/DEBIAN/control"
+          printf "Description: Dynamic Island / Floating Media HUD for Wayland compositors\n" >> "${PKG}/DEBIAN/control"
+          printf " A fluid, low-resource Dynamic Island / Floating Media & Hardware HUD\n" >> "${PKG}/DEBIAN/control"
+          printf " for Wayland compositors (Hyprland, Sway, River, Niri), built with Rust,\n" >> "${PKG}/DEBIAN/control"
+          printf " GTK4, wlr-layer-shell, D-Bus MPRIS2, and PipeWire.\n" >> "${PKG}/DEBIAN/control"
+          printf "Homepage: https://github.com/3m44n/iSLET\n" >> "${PKG}/DEBIAN/control"
+          printf "Depends: libc6, libgtk-4-1, libadwaita-1-0, libpipewire-0.3-0, wireplumber\n" >> "${PKG}/DEBIAN/control"
+
+          dpkg-deb --build --root-owner-group "${PKG}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            islet-*-x86_64-linux.tar.gz
+            islet-*-x86_64-linux.tar.gz.sha256
+            *.deb
+          generate_release_notes: true
+
+      - name: Deploy to AUR
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          VERSION="${{ steps.vars.outputs.version }}"
+          TAG="${{ steps.vars.outputs.tag }}"
+          SHA=$(cat "islet-${TAG}-x86_64-linux.tar.gz.sha256" | awk '{print $1}')
+
+          mkdir -p ~/.ssh
+          echo "$AUR_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes" git clone ssh://aur@aur.archlinux.org/islet.git aur-repo
+          cd aur-repo
+
+          git config user.name "3m44n"
+          git config user.email "notximan@proton.me"
+
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${SHA}')/" PKGBUILD
+
+          sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
+          sed -i "s/pkgrel = .*/pkgrel = 1/" .SRCINFO
+          sed -i "s|source = .*|source = islet-${VERSION}.tar.gz::https://github.com/3m44n/iSLET/releases/download/v${VERSION}/islet-v${VERSION}-x86_64-linux.tar.gz|" .SRCINFO
+          sed -i "s/sha256sums = .*/sha256sums = ${SHA}/" .SRCINFO
+
+          if git diff --quiet PKGBUILD .SRCINFO; then
+            echo "AUR package is already up to date."
+          else
+            git add PKGBUILD .SRCINFO
+            git commit -m "auto: release v${VERSION}"
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes" git push origin master
+            echo "Successfully deployed v${VERSION} to AUR!"
+          fi
