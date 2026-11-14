@@ -67,6 +67,7 @@ pub struct EventSender {
 
 impl EventSender {
     /// Sends an event to the state machine loop without blocking.
+    #[must_use]
     pub fn send(&self, event: IsletEvent) -> bool {
         self.tx.send(event).is_ok()
     }

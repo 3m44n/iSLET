@@ -168,6 +168,24 @@ impl PlayerRegistry {
             .max_by_key(|(_, e)| e.last_active_seq)
             .map(|(id, e)| (id.as_str(), e.status, e.metadata.as_ref()))
     }
+
+    /// Removes players that have been in `Stopped` state for more than `max_age_seq` activity ticks.
+    /// Returns the number of players removed.
+    pub fn prune_stopped_players(&mut self, max_age_seq: u64) -> usize {
+        let initial_len = self.players.len();
+        self.players.retain(|_, entry| {
+            if entry.status == PlaybackStatus::Stopped {
+                self.activity_counter.saturating_sub(entry.last_active_seq) <= max_age_seq
+            } else {
+                true
+            }
+        });
+        let removed = initial_len.saturating_sub(self.players.len());
+        if removed > 0 && self.last_active_id.as_deref().is_some_and(|id| !self.players.contains_key(id)) {
+            self.last_active_id = self.select_active_player().map(|(id, _, _)| id.to_owned());
+        }
+        removed
+    }
 }
 
 /// Core Islet state machine.
@@ -220,30 +238,29 @@ impl StateMachine {
                 metadata,
             } => {
                 self.players.update_player(player_id, status, metadata);
-                let base_media = PillState::Media {
-                    expanded: false,
-                    controls_visible: false,
-                };
-                self.restorable_state = if status == PlaybackStatus::Stopped {
-                    Self::resting_state_for(&self.config, None)
-                } else {
-                    base_media
-                };
+                let active_status = self
+                    .players
+                    .select_active_player()
+                    .map(|(_, s, _)| s);
+
+                // Re-derive the restorable state from the *current* registry so that
+                // one player stopping does not wipe out another still-active player.
+                self.restorable_state = Self::resting_state_for(&self.config, active_status);
 
                 if matches!(self.state, PillState::Slider(_)) {
                     return self.effect(None);
                 }
 
-                if status == PlaybackStatus::Stopped {
-                    self.state = self.restorable_state.clone();
-                    self.effect(None)
-                } else {
+                if active_status.is_some() {
                     self.state = PillState::Media {
                         expanded: true,
                         controls_visible: self.hovering && self.config.hover_expand,
                     };
                     let seq = self.bump_seq();
                     self.effect(Some((seq, self.config.media_collapse_ms)))
+                } else {
+                    self.state = self.restorable_state.clone();
+                    self.effect(None)
                 }
             }
 

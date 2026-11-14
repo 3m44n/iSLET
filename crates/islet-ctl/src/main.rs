@@ -5,13 +5,14 @@
 //!   islet-ctl show brightness 80
 //!   islet-ctl toggle
 //!   islet-ctl notify "Title" "Body"
+//!   islet-ctl ping
 
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 
-use islet_core::{socket_path, IpcCommand};
+use islet_core::{IpcCommand, IpcResponse, socket_path};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -32,6 +33,9 @@ fn main() -> ExitCode {
         }
     };
 
+    // Set a short connect timeout so a dead/stalled daemon fails fast instead of hanging.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+
     if let Err(err) = stream.write_all(cmd.to_wire_line().as_bytes()) {
         eprintln!("islet-ctl: failed to send command: {err}");
         return ExitCode::FAILURE;
@@ -39,10 +43,25 @@ fn main() -> ExitCode {
 
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
-    if reader.read_line(&mut response).is_ok() && response.starts_with("OK") {
-        ExitCode::SUCCESS
+    if reader.read_line(&mut response).is_ok() {
+        let trimmed = response.trim();
+        match trimmed.parse::<IpcResponse>() {
+            Ok(IpcResponse::Ok | IpcResponse::Pong) => ExitCode::SUCCESS,
+            Ok(IpcResponse::ErrInvalidCommand) => {
+                eprintln!("islet-ctl: daemon rejected command as invalid");
+                ExitCode::FAILURE
+            }
+            Ok(IpcResponse::ErrShutdown) => {
+                eprintln!("islet-ctl: daemon is shutting down");
+                ExitCode::FAILURE
+            }
+            Err(()) => {
+                eprintln!("islet-ctl: daemon returned unexpected response: {trimmed}");
+                ExitCode::FAILURE
+            }
+        }
     } else {
-        eprintln!("islet-ctl: daemon returned {}", response.trim());
+        eprintln!("islet-ctl: no response from daemon");
         ExitCode::FAILURE
     }
 }
@@ -59,9 +78,14 @@ fn parse_cli_args(args: &[String]) -> Option<IpcCommand> {
                 "brightness" | "bri" => Some(IpcCommand::ShowBrightness(val.min(100))),
                 "battery" | "bat" => {
                     let charging = args.get(3).is_some_and(|s| {
-                        s.eq_ignore_ascii_case("charging") || s == "1" || s.eq_ignore_ascii_case("true")
+                        s.eq_ignore_ascii_case("charging")
+                            || s == "1"
+                            || s.eq_ignore_ascii_case("true")
                     });
-                    Some(IpcCommand::ShowBattery { percent: val.min(100), charging })
+                    Some(IpcCommand::ShowBattery {
+                        percent: val.min(100),
+                        charging,
+                    })
                 }
                 _ => None,
             }
@@ -78,11 +102,11 @@ fn parse_cli_args(args: &[String]) -> Option<IpcCommand> {
 fn print_usage() {
     eprintln!(
         "Usage:
-           islet-ctl show volume <0..150>
-           islet-ctl show brightness <0..100>
-           islet-ctl show battery <0..100> [charging]
-           islet-ctl toggle
-           islet-ctl notify <Title> [Body]
-           islet-ctl ping"
+   islet-ctl show volume <0..150>
+   islet-ctl show brightness <0..100>
+   islet-ctl show battery <0..100> [charging]
+   islet-ctl toggle
+   islet-ctl notify <Title> [Body]
+   islet-ctl ping"
     );
 }

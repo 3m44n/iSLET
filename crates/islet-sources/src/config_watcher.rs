@@ -39,11 +39,11 @@ pub async fn run_config_and_css_watcher(sender: EventSender) {
 
     // Load initial config and custom CSS if present.
     if let Ok(raw) = tokio::fs::read_to_string(&config_path).await {
-        sender.send(IsletEvent::ConfigReloaded(IsletConfig::from_toml_str(&raw)));
+        let _ = sender.send(IsletEvent::ConfigReloaded(IsletConfig::from_toml_str(&raw)));
     }
     if let Ok(css) = tokio::fs::read_to_string(&css_path).await {
         if !css.trim().is_empty() {
-            sender.send(IsletEvent::CssReloaded(css));
+            let _ = sender.send(IsletEvent::CssReloaded(css));
         }
     }
 
@@ -76,12 +76,12 @@ pub async fn run_config_and_css_watcher(sender: EventSender) {
             if let Ok(raw) = tokio::fs::read_to_string(&config_path).await {
                 let cfg = IsletConfig::from_toml_str(&raw);
                 info!("Hot-reloaded config.toml");
-                sender.send(IsletEvent::ConfigReloaded(cfg));
+                let _ = sender.send(IsletEvent::ConfigReloaded(cfg));
             }
         } else if name == "style.css" {
             if let Ok(css) = tokio::fs::read_to_string(&css_path).await {
                 info!("Hot-reloaded style.css");
-                sender.send(IsletEvent::CssReloaded(css));
+                let _ = sender.send(IsletEvent::CssReloaded(css));
             }
         }
     }

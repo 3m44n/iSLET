@@ -148,7 +148,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             if let Some((seq, timeout_ms)) = effect.schedule_collapse {
                 let tx = sender_for_timers.clone();
                 glib::timeout_add_local_once(Duration::from_millis(timeout_ms), move || {
-                    tx.send(IsletEvent::AutoCollapse { seq });
+                    let _ = tx.send(IsletEvent::AutoCollapse { seq });
                 });
             }
         }
@@ -167,18 +167,15 @@ fn bind_window_to_connector(window: &gtk4::ApplicationWindow, target_connector: 
             continue;
         };
 
-        match target_connector {
-            Some(wanted) => {
-                if monitor.connector().as_deref() == Some(wanted) {
-                    window.set_monitor(&monitor);
-                    info!(connector = wanted, "Moved Islet overlay to target monitor");
-                    return;
-                }
-            }
-            None => {
+        if let Some(wanted) = target_connector {
+            if monitor.connector().as_deref() == Some(wanted) {
                 window.set_monitor(&monitor);
+                info!(connector = wanted, "Moved Islet overlay to target monitor");
                 return;
             }
+        } else {
+            window.set_monitor(&monitor);
+            return;
         }
     }
 }

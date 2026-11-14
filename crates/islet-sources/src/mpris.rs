@@ -74,7 +74,7 @@ pub async fn run_mpris_watcher(
                         }
                         (false, true) => {
                             debug!(bus_name, "MPRIS player left D-Bus");
-                            sender_for_names.send(IsletEvent::MprisPlayerRemoved {
+                            let _ = sender_for_names.send(IsletEvent::MprisPlayerRemoved {
                                 player_id: bus_name.to_owned(),
                             });
                         }
@@ -157,7 +157,7 @@ async fn emit_parsed_properties(
         }
     }
 
-    sender.send(IsletEvent::MprisUpdate {
+    let _ = sender.send(IsletEvent::MprisUpdate {
         player_id: player_id.to_owned(),
         status,
         metadata,

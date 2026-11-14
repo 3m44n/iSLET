@@ -1,6 +1,7 @@
 //! Unix domain socket IPC wire protocol (`$XDG_RUNTIME_DIR/islet.sock`).
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::event::IsletEvent;
 
@@ -15,6 +16,54 @@ pub enum IpcCommand {
     Ping,
 }
 
+/// Server response sent back to `islet-ctl` after handling a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpcResponse {
+    /// Command accepted and forwarded to the state machine.
+    Ok,
+    /// Daemon is alive (returned for `PING`).
+    Pong,
+    /// Command was malformed or unrecognised.
+    ErrInvalidCommand,
+    /// Daemon is shutting down or the socket is closing.
+    ErrShutdown,
+}
+
+impl IpcResponse {
+    /// Serializes the response into a single newline-terminated wire line.
+    #[must_use]
+    pub fn to_wire_line(self) -> &'static str {
+        match self {
+            Self::Ok => "OK\n",
+            Self::Pong => "PONG\n",
+            Self::ErrInvalidCommand => "ERR invalid command\n",
+            Self::ErrShutdown => "ERR shutdown\n",
+        }
+    }
+}
+
+impl FromStr for IpcResponse {
+    type Err = ();
+
+    /// Parses a single daemon wire line into an `IpcResponse`.
+    fn from_str(line: &str) -> Result<Self, Self::Err> {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("OK") {
+            return Ok(Self::Ok);
+        }
+        if trimmed.eq_ignore_ascii_case("PONG") {
+            return Ok(Self::Pong);
+        }
+        if trimmed.starts_with("ERR") {
+            if trimmed.to_ascii_lowercase().contains("shutdown") {
+                return Ok(Self::ErrShutdown);
+            }
+            return Ok(Self::ErrInvalidCommand);
+        }
+        Err(())
+    }
+}
+
 impl IpcCommand {
     /// Serializes a command into a single newline-terminated wire line.
     #[must_use]
@@ -23,7 +72,7 @@ impl IpcCommand {
             Self::ShowVolume(v) => format!("SHOW_VOLUME {v}\n"),
             Self::ShowBrightness(b) => format!("SHOW_BRIGHTNESS {b}\n"),
             Self::ShowBattery { percent, charging } => {
-                format!("SHOW_BATTERY {percent} {}\n", if *charging { 1 } else { 0 })
+                format!("SHOW_BATTERY {percent} {}\n", i32::from(*charging))
             }
             Self::Toggle => "TOGGLE\n".to_owned(),
             Self::Notify { title, body } => {
@@ -54,10 +103,7 @@ impl IpcCommand {
             return Some(Self::ShowBrightness(val));
         }
         if let Some(rest) = trimmed.strip_prefix("SHOW_BATTERY ") {
-            let mut parts = rest.split_whitespace();
-            let pct = parts.next()?.parse::<u8>().ok()?.min(100);
-            let charging = parts.next().is_some_and(|s| s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("charging"));
-            return Some(Self::ShowBattery { percent: pct, charging });
+            return parse_show_battery(rest);
         }
         if let Some(rest) = trimmed.strip_prefix("NOTIFY ") {
             let (title, body) = rest.split_once('\t').unwrap_or((rest, ""));
@@ -86,6 +132,16 @@ impl IpcCommand {
             Self::Ping => None,
         }
     }
+}
+
+/// Parses the payload after a `SHOW_BATTERY ` prefix into a `ShowBattery` command.
+fn parse_show_battery(rest: &str) -> Option<IpcCommand> {
+    let mut parts = rest.split_whitespace();
+    let pct = parts.next()?.parse::<u8>().ok()?.min(100);
+    let charging = parts
+        .next()
+        .is_some_and(|s| s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("charging"));
+    Some(IpcCommand::ShowBattery { percent: pct, charging })
 }
 
 /// Resolves `$XDG_RUNTIME_DIR/islet.sock` (with `/tmp/islet-<uid>.sock` fallback).
