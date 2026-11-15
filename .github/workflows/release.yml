@@ -60,7 +60,7 @@ jobs:
       - name: Determine version tag
         id: vars
         run: |
-          TAG="${GITHUB_REF_NAME:-v0.1.0}"
+          TAG="${GITHUB_REF_NAME:-v0.1.1}"
           CLEAN_VER="${TAG#v}"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
