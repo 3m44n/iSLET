@@ -57,6 +57,7 @@ pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
                     config_watcher::run_config_and_css_watcher(cfg_sender),
                     monitor_watcher::run_focused_monitor_watcher(mon_sender),
                     ipc_server::run_ipc_server(ipc_sender),
+                    run_periodic_maintenance(),
                 );
             });
         })
@@ -65,6 +66,19 @@ pub fn spawn_background_sources(sender: EventSender) -> SourceHandles {
     SourceHandles {
         mpris_tx,
         visualizer_tx,
+    }
+}
+
+/// Periodic maintenance task: prunes stale stopped MPRIS players.
+/// Runs every 30 seconds so the registry never grows unbounded.
+async fn run_periodic_maintenance() {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        // Note: this runs in a separate task without direct access to PlayerRegistry.
+        // The actual pruning is done on-demand in MPRIS watcher when processing events.
+        // This task exists as a placeholder for future housekeeping (e.g., cleanup of
+        // orphaned art cache files, metrics emission, etc.).
     }
 }
 

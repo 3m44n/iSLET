@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 
 pub use config::{IdleMode, IsletConfig, MonitorFollow};
 pub use event::{EventBus, EventSender, IsletEvent};
-pub use ipc::{socket_path, IpcCommand};
+pub use ipc::{socket_path, IpcCommand, IpcResponse};
 pub use state::{
     PillState, PlaybackStatus, PlayerRegistry, SliderKind, StateMachine, TrackMetadata,
     TransitionEffect,
 };
 
-/// Logical dimensions (in application pixels before HiDPI scale) for the pill.
+/// Logical dimensions (in application pixels before `HiDPI` scale) for the pill.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PillDimensions {
     pub width: f64,
@@ -23,6 +23,7 @@ pub struct PillDimensions {
 }
 
 impl PillDimensions {
+    #[must_use]
     pub const fn new(width: f64, height: f64) -> Self {
         Self { width, height }
     }
@@ -140,6 +141,7 @@ mod tests {
             IpcCommand::ShowVolume(70),
             IpcCommand::ShowBrightness(85),
             IpcCommand::ShowBattery { percent: 80, charging: true },
+            IpcCommand::ShowBattery { percent: 15, charging: false },
             IpcCommand::Toggle,
             IpcCommand::Notify {
                 title: "Battery Low".into(),
@@ -152,5 +154,24 @@ mod tests {
             let parsed = IpcCommand::from_wire_line(&line).expect("should parse wire command");
             assert_eq!(parsed, cmd);
         }
+    }
+
+    #[test]
+    fn ipc_response_roundtrip() {
+        use std::str::FromStr;
+        for resp in [
+            IpcResponse::Ok,
+            IpcResponse::Pong,
+            IpcResponse::ErrInvalidCommand,
+            IpcResponse::ErrShutdown,
+        ] {
+            let line = resp.to_wire_line();
+            let parsed = IpcResponse::from_str(line.trim()).expect("should parse response");
+            assert_eq!(parsed, resp);
+        }
+
+        assert!(IpcResponse::from_str("garbage").is_err());
+        assert_eq!(IpcResponse::from_str("ERR shutdown").unwrap(), IpcResponse::ErrShutdown);
+        assert_eq!(IpcResponse::from_str("ERR nope").unwrap(), IpcResponse::ErrInvalidCommand);
     }
 }

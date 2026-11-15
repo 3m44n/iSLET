@@ -59,7 +59,7 @@ pub async fn run_backlight_watcher(sender: EventSender) {
                 if last_percent != Some(pct) {
                     last_percent = Some(pct);
                     debug!(percent = pct, "Backlight brightness changed");
-                    sender.send(IsletEvent::BrightnessChanged { percent: pct });
+                    let _ = sender.send(IsletEvent::BrightnessChanged { percent: pct });
                 }
             }
         }

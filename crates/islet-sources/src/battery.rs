@@ -53,7 +53,7 @@ pub async fn run_battery_watcher(sender: EventSender) {
 
                         if charging_flipped || is_critical {
                             debug!(percent, charging, "Battery state notification triggered");
-                            sender.send(IsletEvent::BatteryChanged { percent, charging });
+                            let _ = sender.send(IsletEvent::BatteryChanged { percent, charging });
                         }
                     }
                 }
@@ -64,7 +64,7 @@ pub async fn run_battery_watcher(sender: EventSender) {
                         let prev_charging = last_state.map(|s| s.1);
                         last_state = Some((percent, charging));
                         if prev_charging.is_some_and(|p| p != charging) {
-                            sender.send(IsletEvent::BatteryChanged { percent, charging });
+                            let _ = sender.send(IsletEvent::BatteryChanged { percent, charging });
                         }
                     }
                 }

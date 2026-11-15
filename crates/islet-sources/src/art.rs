@@ -81,6 +81,7 @@ async fn fetch_remote_art(url: &str, cache_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Extracts a vibrant dominant RGB tuple using `color-thief` on downsampled image pixels.
+#[must_use]
 pub fn extract_dominant_rgb(path: &Path) -> Option<(u8, u8, u8)> {
     let img = image::open(path).ok()?;
     let rgb = img.thumbnail(64, 64).to_rgb8();

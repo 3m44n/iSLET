@@ -1,11 +1,10 @@
-//! PipeWire default sink monitor capture, `rustfft` spectrum analyzer, and procedural fallback.
+//! `PipeWire` default sink capture, `rustfft` spectrum analyzer, and procedural fallback.
 //!
 //! Automatically suspends capture and FFT timers whenever nothing is playing or the pill is hidden
 //! so idle CPU usage stays at 0%.
 
 use std::f32::consts::PI;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use islet_core::{EventSender, IsletEvent};
@@ -16,8 +15,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-const FFT_SIZE: usize = 1024;
 const DEFAULT_BARS: usize = 16;
+const MAX_BARS: usize = 24;
+const MIN_BARS: usize = 12;
 
 /// Control state for starting/stopping the visualizer pipeline with zero idle wakeups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,16 +38,15 @@ impl Default for VisualizerControl {
 /// Runs the demand-driven audio visualizer task.
 ///
 /// Sleeps completely (`changed().await`) when `active == false`. When `active == true`,
-/// streams PCM from PipeWire's default sink monitor (`pw-cat` / `parec`), computes a
-/// Hann-windowed 1024-point FFT via `rustfft`, and falls back to a procedural harmonic
+/// streams PCM from `PipeWire`'s default sink monitor (`pw-cat` / `parec`), computes a
+/// Hann-windowed FFT via `rustfft`, and falls back to a procedural harmonic
 /// waveform if monitor capture is unavailable.
+///
+/// Uses 512-point FFT for ≤16 bars (lower CPU), 1024-point for >16 bars (better frequency resolution).
 pub async fn run_visualizer(
     sender: EventSender,
     mut ctrl_rx: watch::Receiver<VisualizerControl>,
 ) {
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE);
-
     loop {
         // 1. Sleep with zero CPU usage while paused, stopped, or hidden.
         while !ctrl_rx.borrow().active {
@@ -56,13 +55,13 @@ pub async fn run_visualizer(
             }
         }
 
-        let bars = ctrl_rx.borrow().bars.clamp(12, 24);
+        let bars = ctrl_rx.borrow().bars.clamp(MIN_BARS, MAX_BARS);
         info!(bars, "Visualizer activated (playback active and pill visible)");
 
         // 2. Try spawning PipeWire / PulseAudio monitor capture process.
         if let Some(mut child) = spawn_monitor_capture() {
             debug!("Capturing live PCM from PipeWire default sink monitor");
-            run_live_fft_capture(&mut child, &fft, &sender, &mut ctrl_rx).await;
+            run_live_fft_capture(&mut child, &sender, &mut ctrl_rx).await;
             let _ = child.kill().await;
         } else {
             warn!("PipeWire monitor capture unavailable; using procedural animated waveform fallback");
@@ -70,8 +69,8 @@ pub async fn run_visualizer(
         }
 
         // Send a zeroed frame on stop so the UI bars decay cleanly to baseline.
-        let bars_now = ctrl_rx.borrow().bars.clamp(12, 24);
-        sender.send(IsletEvent::SpectrumFrame(vec![0.0; bars_now]));
+        let bars_now = ctrl_rx.borrow().bars.clamp(MIN_BARS, MAX_BARS);
+        let _ = sender.send(IsletEvent::SpectrumFrame(vec![0.0; bars_now]));
         debug!("Visualizer suspended (zero idle CPU)");
     }
 }
@@ -113,7 +112,6 @@ fn spawn_monitor_capture() -> Option<Child> {
 
 async fn run_live_fft_capture(
     child: &mut Child,
-    fft: &Arc<dyn rustfft::Fft<f32>>,
     sender: &EventSender,
     ctrl_rx: &mut watch::Receiver<VisualizerControl>,
 ) {
@@ -121,9 +119,12 @@ async fn run_live_fft_capture(
         return;
     };
 
-    let mut byte_buf = vec![0_u8; FFT_SIZE * 4];
-    let mut pcm_samples = vec![0.0_f32; FFT_SIZE];
-    let mut fft_buffer = vec![Complex::new(0.0_f32, 0.0_f32); FFT_SIZE];
+    let mut fft_size = 512;
+    let mut planner = FftPlanner::<f32>::new();
+    let mut fft = planner.plan_fft_forward(fft_size);
+
+    let mut byte_buf = vec![0_u8; fft_size * 4];
+    let mut pcm_samples = vec![0.0_f32; fft_size];
     let mut phase = 0.0_f32;
 
     loop {
@@ -131,7 +132,17 @@ async fn run_live_fft_capture(
         if !ctrl.active {
             break;
         }
-        let bar_count = ctrl.bars.clamp(12, 24);
+        let bar_count = ctrl.bars.clamp(MIN_BARS, MAX_BARS);
+
+        // Recreate FFT planner if bar count crosses the threshold
+        let new_fft_size = if bar_count <= 16 { 512 } else { 1024 };
+        if new_fft_size != fft_size {
+            fft_size = new_fft_size;
+            planner = FftPlanner::<f32>::new();
+            fft = planner.plan_fft_forward(fft_size);
+            byte_buf.resize(fft_size * 4, 0);
+            pcm_samples.resize(fft_size, 0.0);
+        }
 
         tokio::select! {
             _ = ctrl_rx.changed() => {
@@ -140,24 +151,22 @@ async fn run_live_fft_capture(
                 }
             }
             read_res = stdout.read_exact(&mut byte_buf) => {
-                match read_res {
-                    Ok(_) => {
-                        for (i, chunk) in byte_buf.chunks_exact(4).enumerate() {
-                            pcm_samples[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        }
-                        let mut spectrum = compute_fft_bars_into(&pcm_samples, fft.as_ref(), bar_count, &mut fft_buffer);
-                        // If monitor stream is completely silent (e.g. sandboxed player), blend subtle procedural motion.
-                        if spectrum.iter().all(|&v| v < 0.02) {
-                            phase += 0.14;
-                            spectrum = procedural_spectrum_frame(phase, bar_count);
-                        }
-                        sender.send(IsletEvent::SpectrumFrame(spectrum));
+                if read_res.is_ok() {
+                    for (i, chunk) in byte_buf.as_chunks::<4>().0.iter().enumerate() {
+                        pcm_samples[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     }
-                    Err(_) => {
-                        // Capture pipe closed; switch to procedural fallback for remainder of active session.
-                        run_procedural_fallback(sender, ctrl_rx).await;
-                        break;
+                    let spectrum = compute_fft_bars(&pcm_samples, fft.as_ref(), bar_count);
+                    // If monitor stream is completely silent (e.g. sandboxed player), blend subtle procedural motion.
+                    let mut final_spectrum = spectrum;
+                    if final_spectrum.iter().all(|&v| v < 0.02) {
+                        phase += 0.14;
+                        final_spectrum = procedural_spectrum_frame(phase, bar_count);
                     }
+                    let _ = sender.send(IsletEvent::SpectrumFrame(final_spectrum));
+                } else {
+                    // Capture pipe closed; switch to procedural fallback for remainder of active session.
+                    run_procedural_fallback(sender, ctrl_rx).await;
+                    break;
                 }
             }
         }
@@ -168,7 +177,7 @@ async fn run_procedural_fallback(
     sender: &EventSender,
     ctrl_rx: &mut watch::Receiver<VisualizerControl>,
 ) {
-    let mut ticker = tokio::time::interval(Duration::from_millis(20)); // 50 Hz updates
+    let mut ticker = tokio::time::interval(Duration::from_millis(33)); // ~30 Hz, lower CPU than 50 Hz
     let mut phase = 0.0_f32;
 
     loop {
@@ -184,23 +193,34 @@ async fn run_procedural_fallback(
                     break;
                 }
                 phase += 0.16;
-                let frame = procedural_spectrum_frame(phase, ctrl.bars.clamp(12, 24));
-                sender.send(IsletEvent::SpectrumFrame(frame));
+                let frame = procedural_spectrum_frame(phase, ctrl.bars.clamp(MIN_BARS, MAX_BARS));
+                let _ = sender.send(IsletEvent::SpectrumFrame(frame));
             }
         }
     }
 }
 
-fn get_hann_window() -> &'static [f32; FFT_SIZE] {
+fn get_hann_window(fft_size: usize) -> &'static [f32] {
     use std::sync::OnceLock;
-    static HANN: OnceLock<[f32; FFT_SIZE]> = OnceLock::new();
-    HANN.get_or_init(|| {
-        let mut table = [0.0_f32; FFT_SIZE];
-        for (i, val) in table.iter_mut().enumerate() {
-            *val = 0.5 * (1.0 - (2.0 * PI * (i as f32) / ((FFT_SIZE - 1) as f32)).cos());
-        }
-        table
-    })
+
+    // Cache windows for 512 and 1024
+    static HANN_512: OnceLock<Vec<f32>> = OnceLock::new();
+    static HANN_1024: OnceLock<Vec<f32>> = OnceLock::new();
+
+    let window = if fft_size == 512 {
+        HANN_512.get_or_init(|| compute_hann_window(512))
+    } else {
+        HANN_1024.get_or_init(|| compute_hann_window(1024))
+    };
+    window
+}
+
+fn compute_hann_window(size: usize) -> Vec<f32> {
+    let mut table = Vec::with_capacity(size);
+    for i in 0..size {
+        table.push(0.5 * (1.0 - (2.0 * PI * (i as f32) / ((size - 1) as f32)).cos()));
+    }
+    table
 }
 
 /// Applies a precomputed Hann window to `samples`, executes `rustfft`, and downsamples magnitudes into `bar_count` log-spaced bars (`0.0..=1.0`).
@@ -210,60 +230,62 @@ pub fn compute_fft_bars(
     fft: &dyn rustfft::Fft<f32>,
     bar_count: usize,
 ) -> Vec<f32> {
-    let mut buffer = vec![Complex::new(0.0_f32, 0.0_f32); FFT_SIZE];
-    compute_fft_bars_into(samples, fft, bar_count, &mut buffer)
-}
-
-/// Zero-allocation variant reusing a caller-provided scratch buffer.
-pub fn compute_fft_bars_into(
-    samples: &[f32],
-    fft: &dyn rustfft::Fft<f32>,
-    bar_count: usize,
-    buffer: &mut [Complex<f32>],
-) -> Vec<f32> {
-    let n = samples.len().min(FFT_SIZE);
-    let bars = bar_count.clamp(12, 24);
+    let fft_size = fft.len();
+    let bars = bar_count.clamp(MIN_BARS, MAX_BARS);
+    let n = samples.len().min(fft_size);
     if n < 16 {
         return vec![0.0; bars];
     }
 
-    let hann = get_hann_window();
-    for i in 0..FFT_SIZE {
-        let sample = samples.get(i).copied().unwrap_or(0.0);
-        buffer[i] = Complex::new(sample * hann[i], 0.0);
+    let hann = get_hann_window(fft_size);
+    // Reuse a thread-local buffer to avoid allocations
+    thread_local! {
+        static BUFFER: std::cell::RefCell<Vec<Complex<f32>>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    fft.process(buffer);
+    let output = BUFFER.with(|buf| {
+        let mut buffer = buf.borrow_mut();
+        buffer.resize(fft_size, Complex::new(0.0_f32, 0.0_f32));
 
-    // Use the positive frequency half-spectrum (`1 .. FFT_SIZE / 2`).
-    let usable_bins = (FFT_SIZE / 2) - 1;
-    let mut output = Vec::with_capacity(bars);
-    let norm = (FFT_SIZE as f32).sqrt();
-
-    for bar_idx in 0..bars {
-        // Exponentially spaced bin ranges so bass and midrange get rich resolution.
-        let t0 = (bar_idx as f32) / (bars as f32);
-        let t1 = ((bar_idx + 1) as f32) / (bars as f32);
-        let start_bin = (1.0 + (usable_bins as f32).powf(t0)).floor() as usize;
-        let end_bin = (1.0 + (usable_bins as f32).powf(t1))
-            .ceil()
-            .max((start_bin + 1) as f32) as usize;
-
-        let slice_end = end_bin.min(usable_bins);
-        let slice_start = start_bin.min(slice_end.saturating_sub(1)).max(1);
-
-        let mut peak = 0.0_f32;
-        for bin in &buffer[slice_start..=slice_end] {
-            let mag = (bin.norm() / norm) * 2.8;
-            if mag > peak {
-                peak = mag;
-            }
+        for i in 0..fft_size {
+            let sample = samples.get(i).copied().unwrap_or(0.0);
+            buffer[i] = Complex::new(sample * hann[i], 0.0);
         }
 
-        // Convert to perceptual curve clamped to `0.0..=1.0`.
-        let perceptual = peak.sqrt().clamp(0.0, 1.0);
-        output.push(perceptual);
-    }
+        fft.process(&mut buffer);
+
+        // Use the positive frequency half-spectrum (`1 .. fft_size / 2`).
+        let usable_bins = (fft_size / 2) - 1;
+        let mut output = Vec::with_capacity(bars);
+        let norm = (fft_size as f32).sqrt();
+
+        for bar_idx in 0..bars {
+            // Exponentially spaced bin ranges so bass and midrange get rich resolution.
+            let t0 = (bar_idx as f32) / (bars as f32);
+            let t1 = ((bar_idx + 1) as f32) / (bars as f32);
+            let start_bin = (1.0 + (usable_bins as f32).powf(t0)).floor() as usize;
+            let end_bin = (1.0 + (usable_bins as f32).powf(t1))
+                .ceil()
+                .max((start_bin + 1) as f32) as usize;
+
+            let slice_end = end_bin.min(usable_bins);
+            let slice_start = start_bin.min(slice_end.saturating_sub(1)).max(1);
+
+            let mut peak = 0.0_f32;
+            for bin in &buffer[slice_start..=slice_end] {
+                let mag = (bin.norm() / norm) * 2.8;
+                if mag > peak {
+                    peak = mag;
+                }
+            }
+
+            // Convert to perceptual curve clamped to `0.0..=1.0`.
+            let perceptual = peak.sqrt().clamp(0.0, 1.0);
+            output.push(perceptual);
+        }
+
+        output
+    });
 
     output
 }
@@ -271,16 +293,16 @@ pub fn compute_fft_bars_into(
 /// Generates a smooth, organic multi-sine waveform across `bar_count` bars when audio capture is unavailable.
 #[must_use]
 pub fn procedural_spectrum_frame(phase: f32, bar_count: usize) -> Vec<f32> {
-    let bars = bar_count.clamp(12, 24);
-    (0..bars)
-        .map(|i| {
-            let x = (i as f32) / (bars as f32);
-            // Bell-curve envelope so center/bass bars are naturally taller than outer edges.
-            let envelope = (PI * x).sin().powf(0.65);
-            let wave1 = (phase + (i as f32) * 0.55).sin().abs();
-            let wave2 = (phase * 1.45 - (i as f32) * 0.35).cos().abs() * 0.6;
-            let combined = ((wave1 + wave2) * 0.58 * envelope).clamp(0.08, 0.96);
-            combined
-        })
-        .collect()
+    let bars = bar_count.clamp(MIN_BARS, MAX_BARS);
+    let mut output = Vec::with_capacity(bars);
+    for i in 0..bars {
+        let x = (i as f32) / (bars as f32);
+        // Bell-curve envelope so center/bass bars are naturally taller than outer edges.
+        let envelope = (PI * x).sin().powf(0.65);
+        let wave1 = (phase + (i as f32) * 0.55).sin().abs();
+        let wave2 = (phase * 1.45 - (i as f32) * 0.35).cos().abs() * 0.6;
+        let combined = ((wave1 + wave2) * 0.58 * envelope).clamp(0.08, 0.96);
+        output.push(combined);
+    }
+    output
 }

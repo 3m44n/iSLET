@@ -108,11 +108,11 @@ impl SpectrumWidget {
             return;
         }
         let mut target = self.target_bars.borrow_mut();
-        if target.len() != frame.len() {
+        if target.len() == frame.len() {
+            target.copy_from_slice(frame);
+        } else {
             *target = frame.to_vec();
             self.current_bars.borrow_mut().resize(frame.len(), 0.0);
-        } else {
-            target.copy_from_slice(frame);
         }
     }
 

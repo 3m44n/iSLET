@@ -19,7 +19,7 @@ pub async fn run_focused_monitor_watcher(sender: EventSender) {
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(mon_name) = parse_hyprland_focusedmon(&line) {
                     debug!(monitor = mon_name, "Hyprland focused monitor changed");
-                    sender.send(IsletEvent::FocusedMonitorChanged(mon_name.to_owned()));
+                    let _ = sender.send(IsletEvent::FocusedMonitorChanged(mon_name.to_owned()));
                 }
             }
         }

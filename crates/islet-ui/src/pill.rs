@@ -103,7 +103,7 @@ impl PillSurface {
 
         // --- 1. Idle View ---
         let idle_label = gtk4::Label::builder()
-            .label(&format!("●  {}", current_hh_mm()))
+            .label(format!("●  {}", current_hh_mm()))
             .halign(gtk4::Align::Center)
             .valign(gtk4::Align::Center)
             .css_classes(["islet-label"])
@@ -323,14 +323,14 @@ impl PillSurface {
         let left_tx = sender.clone();
         let left_click = gtk4::GestureClick::builder().button(1).build();
         left_click.connect_released(move |_, _, _, _| {
-            left_tx.send(IsletEvent::PillClicked);
+            let _ = left_tx.send(IsletEvent::PillClicked);
         });
         pill_frame.add_controller(left_click);
 
         let right_tx = sender.clone();
         let right_click = gtk4::GestureClick::builder().button(3).build();
         right_click.connect_released(move |_, _, _, _| {
-            right_tx.send(IsletEvent::PillRightClicked);
+            let _ = right_tx.send(IsletEvent::PillRightClicked);
         });
         pill_frame.add_controller(right_click);
 
@@ -338,10 +338,10 @@ impl PillSurface {
         let hover_leave_tx = sender;
         let motion_ctrl = gtk4::EventControllerMotion::new();
         motion_ctrl.connect_enter(move |_, _, _| {
-            hover_enter_tx.send(IsletEvent::HoverChanged(true));
+            let _ = hover_enter_tx.send(IsletEvent::HoverChanged(true));
         });
         motion_ctrl.connect_leave(move |_| {
-            hover_leave_tx.send(IsletEvent::HoverChanged(false));
+            let _ = hover_leave_tx.send(IsletEvent::HoverChanged(false));
         });
         pill_frame.add_controller(motion_ctrl);
 

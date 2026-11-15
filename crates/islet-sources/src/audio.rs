@@ -1,4 +1,4 @@
-//! Event-driven PipeWire / PulseAudio volume watcher (`pactl subscribe` + `wpctl get-volume`).
+//! Event-driven `PipeWire` / `PulseAudio` volume watcher (`pactl subscribe` + `wpctl get-volume`).
 //!
 //! Uses zero polling loops: blocks asynchronously on `pactl subscribe` stdout lines and
 //! queries `wpctl` (or `pactl` fallback) only when a sink/server event arrives.
@@ -42,7 +42,7 @@ pub async fn run_audio_watcher(sender: EventSender) {
             if last_state != Some((percent, muted)) {
                 last_state = Some((percent, muted));
                 debug!(percent, muted, "Audio volume changed");
-                sender.send(IsletEvent::VolumeChanged { percent, muted });
+                let _ = sender.send(IsletEvent::VolumeChanged { percent, muted });
             }
         }
     }
@@ -80,7 +80,7 @@ async fn query_current_volume() -> Option<(u8, bool)> {
     parse_pactl_volume_and_mute(&vol_str, &mute_str)
 }
 
-/// Parses WirePlumber output such as `"Volume: 0.72"` or `"Volume: 0.45 [MUTED]"`.
+/// Parses `WirePlumber` output such as `"Volume: 0.72"` or `"Volume: 0.45 [MUTED]"`.
 #[must_use]
 pub fn parse_wpctl_volume(output: &str) -> Option<(u8, bool)> {
     let muted = output.contains("[MUTED]");
